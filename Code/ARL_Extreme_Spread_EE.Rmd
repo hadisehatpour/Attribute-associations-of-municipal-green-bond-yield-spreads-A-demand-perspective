@@ -1,0 +1,546 @@
+---
+title: "Extereme Spread"
+author: "Hadi"
+date: "2023-12-05"
+output: html_document
+---
+load libraries
+```{r}
+library(arules)
+library(arulesViz)
+library(knitr)
+library(plyr)
+library(dplyr)
+library(RColorBrewer)
+library(stringr)
+library(quantmod)
+library(splines2)
+library(splines)
+library(mgcv)
+library (RQuantLib)
+library(tidyr)
+library(xts)
+library(plotly)
+library(lubridate)
+library (readxl)
+library(ggplot2)
+library(dplyr)
+library(scatterplot3d)
+library(tidyverse)
+library (zoo)
+library(plotly)
+library(writexl)
+library(YieldCurve)
+library(patchwork)
+library(gridExtra)
+library(stargazer)
+library(scales)
+library(pdfetch)
+library(xtable)
+```
+
+
+FOR SIMPLICITY, YOU CAN IGNORE THE LABELING PROCESS AND LOAD THE CALTOTEXTRTR.CSV FILE AS THE LABELED DATASET FOR THE EXTREME SPREAD.
+
+Importing transaction file
+```{r}
+
+tr_int <- read.transactions(".../Caltotextrtr.csv", format = "basket", sep = ",")
+
+```
+
+
+```{r}
+
+## =============================================
+## Data lebelling process for extereme spread
+## =============================================
+
+
+##====================== Load datasets ===============================
+
+# MLFeat <- 
+#   read_excel(path =".../Features.xlsx", na = c ("NA", "#N/A N/A", "#N/A Field Not Applicable", "#N/A Invalid Security"))
+# 
+# California <- read_feather(".../California.feather")
+
+
+
+
+##====================Data preparation and labelling============================
+
+
+
+# #==============Add median (and mean) of S1 by year and bond===================
+# 
+# 
+# ARL <- California %>% group_by(ID_CUSIP, year) %>% dplyr::summarise(Med_S1 = median(S1)
+#                                                                     , Mea_S1 = mean(S1))
+# 
+# #Label Spread based on their magnitude
+# 
+# first_percentile <- quantile(ARL$Med_S1, 0.25)  
+# last_percentile <- quantile(ARL$Med_S1, 0.75)    
+# 
+# ARL <- ARL %>%
+#   mutate(
+#     Med_S1_int_labels = case_when(
+#       is.na(Med_S1) ~ NA_character_,
+#       Med_S1 == 0 ~ "S0",
+#       Med_S1 < 0 & Med_S1 < first_percentile ~ "S-(Extreme)",
+#       Med_S1 < 0 & Med_S1 >= first_percentile ~ "S-(Low)",
+#       Med_S1 > 0 & Med_S1 > last_percentile ~ "S+(Extreme)",
+#       Med_S1 > 0 & Med_S1 <= last_percentile ~ "S+(Low)",
+#       TRUE ~ "S0"
+#     )
+#   )
+# 
+# 
+# 
+# #Adding features
+# 
+# ARL <- merge(ARL, MLFeat, by = "ID_CUSIP")
+# 
+# 
+# #=====================labeling numerical features============================
+# 
+# #replace labels  for Callability
+# 
+# for (i in 1:nrow(ARL)) {
+#   if (ARL$CALLABLE[i] == "FALSE") {
+#     ARL$CALLABLE[i] <- "Non-callable"
+#   } else {
+#     ARL$CALLABLE[i] <- "Callable"
+#   }
+# }
+# 
+# 
+# 
+# 
+# #SELF_REPRTD_GREEN_INSTR_INDCTR
+# 
+# ARL$SELF_REPRTD_GREEN_INSTR_INDCTR[ARL$SELF_REPRTD_GREEN_INSTR_INDCTR == "TRUE"]<-
+#   "YES"
+# 
+# #Coupon rate
+# cpn_intervals <- cut(ARL$CPN, breaks = c(0, 2.99, 4.999, 15), labels = c("0_3(%)", "3_5(%)", "5_8.5(%)"))
+# 
+# ARL <- ARL %>% mutate(CPN_Group = cpn_intervals)
+# 
+# #SPREAD_AT_ISSUANCE_TO_WORST
+# Sp_at_iss_intervals <- cut(ARL$SPREAD_AT_ISSUANCE_TO_WORST,
+#                            breaks = c(quantile(ARL$SPREAD_AT_ISSUANCE_TO_WORST, na.rm = TRUE)), na.rm = TRUE,
+#                            labels =  c("Less than 17", "17_57", "57_100", "Higher than 100"), include.lowest = TRUE)
+# 
+# ARL <- ARL %>% mutate(S_AT_Iss = Sp_at_iss_intervals)
+# 
+# 
+# #DUR_ADJ_MID
+# DUR_ADJ_MID_intervals <- cut(ARL$DUR_ADJ_MID,
+#                            breaks = c(quantile(ARL$DUR_ADJ_MID, na.rm = TRUE)), na.rm = TRUE,
+#                            labels =  c(" Less than 2.8", "2.8_4.8", "4.8_7", "Higher than 7"), include.lowest = TRUE)
+# 
+# ARL <- ARL %>% mutate(DAM = DUR_ADJ_MID_intervals)
+# 
+# 
+# 
+# #DUR_MID
+# DUR_MID_intervals <- cut(ARL$DUR_MID,
+#                            breaks = c(quantile(ARL$DUR_MID, na.rm = TRUE)), na.rm = TRUE,
+#                            labels =  c("Less than 2.9", "2.9_4.9", "4.9_7.3", " Higher than 7.3"), include.lowest = TRUE)
+# 
+# ARL <- ARL %>% mutate(DM = DUR_MID_intervals)
+# 
+# 
+# 
+# #	YIELD_ON_ISSUE_DATE
+# Y_on_Iss_Date_intervals <- cut(ARL$YIELD_ON_ISSUE_DATE,
+#                            breaks = c(quantile(ARL$YIELD_ON_ISSUE_DATE, na.rm = TRUE)), na.rm = TRUE,
+#                            labels =  c(" Less than 1.7", "1.7_2.4", "2.4_3.2", "Higher than 3.2"), include.lowest = TRUE)
+# 
+# ARL <- ARL %>% mutate(Y_OID = Y_on_Iss_Date_intervals)
+# 
+# 
+# 
+# 
+# #	ISSUE_PX
+# 
+# #1-labeling price at issuance
+# 
+# ARL <- ARL %>%
+#   mutate(
+#     Iss_pri._spread = case_when(
+#       is.na(ISSUE_PX) ~ NA_character_,
+#       ISSUE_PX == 100 ~ "At Par",
+#       ISSUE_PX < 100 ~ "At Discount",
+#       ISSUE_PX > 100 ~ "At Premium"
+#     )
+#   )
+# 
+# 
+# #AMT_ISSUED
+# ARL$log_AMT_ISSUED <- log(ARL$AMT_ISSUED)
+# 
+# Amt_issued_intervals <- cut(ARL$log_AMT_ISSUED,
+#                            breaks = c(quantile(ARL$log_AMT_ISSUED, na.rm = TRUE)), na.rm = TRUE,
+#                            labels =  c("Less than 14", "14_15", "15_16", "Higher than 16"), include.lowest = TRUE)
+# 
+# ARL <- ARL %>% mutate(Amt_iss_int = Amt_issued_intervals)
+# 
+# #MUNI_ISSUE_SIZE
+# ARL$log_MUNI_ISSUE_SIZE <- log(ARL$MUNI_ISSUE_SIZE)
+# 
+# MUNI_ISSUE_SIZE_intervals <- cut(ARL$log_MUNI_ISSUE_SIZE,
+#                            breaks = c(quantile(ARL$log_MUNI_ISSUE_SIZE, na.rm = TRUE)), na.rm = TRUE,
+#                            labels =  c("Less than 17", "17_18.7", "18.7_19.5", "Higher than 19.5"), include.lowest = TRUE)
+# 
+# ARL <- ARL %>% mutate(MUNI_ISSUE_SIZE_int = MUNI_ISSUE_SIZE_intervals)
+# 
+# 
+# #SHORT_AND_LONG_TERM_DEBT
+# ARL$Log_DEBT <- log(ARL$SHORT_AND_LONG_TERM_DEBT)
+# 
+# Debt_intervals <- cut(ARL$Log_DEBT,
+#                            breaks = c(quantile(ARL$Log_DEBT, na.rm = TRUE)), na.rm = TRUE,
+#                            labels =  c("Less than 5", "5-6.5", "6.5_8", "Higher than 8"), include.lowest = TRUE)
+# 
+# ARL <- ARL %>% mutate(S_L_DEBT = Debt_intervals)
+# 
+# 
+# #8.	SALES_REV_TURN
+# ARL$Log_Sale_Turn <- log(ARL$SALES_REV_TURN)
+# 
+# Sale_intervals <- cut(ARL$Log_Sale_Turn,
+#                            breaks = c(quantile(ARL$Log_Sale_Turn, na.rm = TRUE)), na.rm = TRUE,
+#                            labels =  c("Less than 3.5", "3.5-4.6", "4.6_6.5", "Higher than 8.5"), include.lowest = TRUE)
+# 
+# ARL <- ARL %>% mutate(SALES_REV_TURN_int = Sale_intervals)
+# 
+# 
+# 
+# #MTY-YEARS
+# 
+# MTY_YEARS_intervals <- cut(ARL$`MTY-YEARS`,
+#                            breaks = c(quantile(ARL$`MTY-YEARS`, na.rm = TRUE)), na.rm = TRUE,
+#                            labels =  c(" Less than 8", "8_12.3", "12.3_17", "Higher than 17"), include.lowest = TRUE)
+# 
+# ARL <- ARL %>% mutate(MTY_YEARS_int = MTY_YEARS_intervals)
+# 
+# #ISSUE_DT and Maturity
+# ARL$Y_l_day <- as.Date(paste(ARL$year, "-12-31", sep = ""), format = "%Y-%m-%d")
+# 
+# 
+# for (i in 1:nrow(ARL)){
+#   ARL$Active_years[i] <- yearFraction(ymd(ARL$ISSUE_DT[i]) 
+#                                    , ymd(ARL$Y_l_day[i]), dayCounters = 12)
+#   ARL$years_to_maturity[i] <- yearFraction(ymd(ARL$Y_l_day[i]) 
+#                                    , ymd(ARL$MATURITY[i]), dayCounters = 12)
+#   
+# }
+# 
+# active_years_interval <- cut(ARL$Active_years,
+#                            breaks = c(quantile(ARL$Active_years, na.rm = TRUE)), na.rm = TRUE,
+#                            labels =  c(" Less than 1.1", "1.1_2.3", "2.3_4.1", "Higher than 4.1"), include.lowest = TRUE)
+# 
+# ARL <- ARL %>% mutate(Active_years_int = active_years_interval)
+# 
+# 
+# years_to_maturity_interval <- cut(ARL$years_to_maturity,
+#                            breaks = c(quantile(ARL$years_to_maturity, na.rm = TRUE)), na.rm = TRUE,
+#                            labels =  c(" Less than 4.7", "4.7_9.4", "9.4_14.4", "Higher than 14.4"), include.lowest = TRUE)
+# 
+# ARL <- ARL %>% mutate(years_to_maturity_int = years_to_maturity_interval)
+# 
+# 
+# 
+# 
+# 
+# 
+# #===================label missing with char "NA"==============================
+# 
+# 
+# 
+# ARL$BB_COMPOSITE[is.na(ARL$BB_COMPOSITE)] <- "Not_Rated"
+# ARL$SELF_REPRTD_GREEN_INSTR_INDCTR[is.na(ARL$SELF_REPRTD_GREEN_INSTR_INDCTR)] <- "Not labelled"
+# ARL$RTG_FITCH[is.na(ARL$RTG_FITCH)] <- "Not_Rated"
+# ARL$RTG_FITCH_LONG[is.na(ARL$RTG_FITCH_LONG)] <- "Not_Rated"
+# 
+# ARL$S_AT_Iss <- as.character(ARL$S_AT_Iss)
+# ARL$S_AT_Iss[is.na(ARL$S_AT_Iss)] <- "NA"
+# 
+# ARL$S_AT_Iss <- as.character(ARL$S_AT_Iss)
+# ARL$S_AT_Iss[is.na(ARL$S_AT_Iss)] <- "NA"
+# 
+# ARL$DAM <- as.character(ARL$DAM)
+# ARL$DAM[is.na(ARL$DAM)] <- "NA"
+# 
+# 
+# ARL$DM <- as.character(ARL$DM)
+# ARL$DM[is.na(ARL$DM)] <- "NA"
+# 
+# 
+# 
+# ARL$Y_OID <- as.character(ARL$Y_OID)
+# ARL$Y_OID[is.na(ARL$Y_OID)] <- "NA"
+# 
+# 
+# 
+# ARL$Iss_pri._spread <- as.character(ARL$Iss_pri._spread)
+# ARL$Iss_pri._spread[is.na(ARL$Iss_pri._spread)] <- "NA"
+# 
+# 
+# ARL$Amt_iss_int <- as.character(ARL$Amt_iss_int)
+# ARL$Amt_iss_int[is.na(ARL$Amt_iss_int)] <- "NA"
+# 
+# 
+# 
+# 
+# 
+# ARL$MUNI_ISSUE_SIZE_int <- as.character(ARL$MUNI_ISSUE_SIZE_int)
+# ARL$MUNI_ISSUE_SIZE_int[is.na(ARL$MUNI_ISSUE_SIZE_int)] <- "NA"
+# 
+# 
+# ARL$MTY_YEARS_int <- as.character(ARL$MTY_YEARS_int)
+# ARL$MTY_YEARS_int[is.na(ARL$MTY_YEARS_int)] <- "NA"
+# 
+# 
+# 
+# 
+# ARL$Active_years_int <- as.character(ARL$Active_years_int)
+# ARL$Active_years_int[is.na(ARL$Active_years_int)] <- "NA"
+# 
+# ARL$years_to_maturity_int <- as.character(ARL$years_to_maturity_int)
+# ARL$years_to_maturity_int[is.na(ARL$years_to_maturity_int)] <- "NA"
+# 
+# 
+# ARL$S_L_DEBT <- as.character(ARL$S_L_DEBT)
+# ARL$S_L_DEBT[is.na(ARL$S_L_DEBT)] <- "NA"
+# 
+# ARL$SALES_REV_TURN_int <- as.character(ARL$SALES_REV_TURN_int)
+# ARL$SALES_REV_TURN_int[is.na(ARL$SALES_REV_TURN_int)] <- "NA"
+# 
+# 
+# 
+# 
+# 
+# #==================Add prefix for features=========================
+# 
+# ARL$BB_COMPOSITE <- paste("BB_rating", ARL$BB_COMPOSITE, sep = " : ")
+# 
+# ARL$MUNI_TAX_PROV <- paste("Tax", ARL$MUNI_TAX_PROV, sep = " : ")
+# 
+# ARL$CPN_TYP <- paste("CPN TYP", ARL$CPN_TYP, sep = " : ")
+# 
+# ARL$CPN_Group <- paste("CPN", ARL$CPN_Group, sep = " : ")
+# 
+# ARL$MARKET_ISSUE <- paste("Market", ARL$MARKET_ISSUE, sep = " : ")
+# 
+# ARL$CALLABLE <- paste("Call", ARL$CALLABLE, sep = " : ")
+# 
+# ARL$MUNI_PURPOSE <- paste("UOP", ARL$MUNI_PURPOSE, sep = " : ")
+# 
+# ARL$FINANCING_TYPE <- paste("FIN. TYP", ARL$FINANCING_TYPE, sep = " : ")
+# 
+# ARL$ISSUER_BULK <- paste("Issuer Name", ARL$ISSUER_BULK, sep = " : ")
+# 
+# ARL$MUNI_LONG_INDUSTRY_TYP <- paste("Issuer Sector", 
+#                                          ARL$MUNI_LONG_INDUSTRY_TYP, sep = " : ")
+# ARL$RTG_FITCH_LONG <- paste("RTG Long Rating", 
+#                                          ARL$RTG_FITCH_LONG, sep = " : ")
+# ARL$RTG_FITCH <- paste("RTG Rating", 
+#                                          ARL$RTG_FITCH, sep = " : ")
+# ARL$S_AT_Iss <- paste("S OID", 
+#                                          ARL$S_AT_Iss, sep = " : ")
+# ARL$DAM <- paste("DU_Adj_MID", 
+#                                          ARL$DAM, sep = " : ")
+# ARL$DM <- paste("DU_MID", 
+#                                          ARL$DM, sep = " : ")
+# ARL$Y_OID <- paste("Y_OID", 
+#                                          ARL$Y_OID, sep = " : ")
+# 
+# ARL$Iss_pri._spread <- paste("Pricing TYP", 
+#                                          ARL$Iss_pri._spread, sep = " : ")
+# 
+# # ARL$Iss._pri_int <- paste("Issue Price Interval", ARL$Iss._pri_int, sep = " : ")
+# 
+# ARL$Amt_iss_int <- paste("Issued Amt", 
+#                                          ARL$Amt_iss_int, sep = " : ")
+# 
+# ARL$MUNI_ISSUE_SIZE_int <- paste("Muni Issued Size", 
+#                                          ARL$MUNI_ISSUE_SIZE_int, sep = " : ")
+# 
+# ARL$MTY_YEARS_int <- paste("Maturity OID", 
+#                                          ARL$MTY_YEARS_int, sep = " : ")
+# ARL$SELF_REPRTD_GREEN_INSTR_INDCTR <- 
+#   paste("Self Rep. Gr.",  ARL$SELF_REPRTD_GREEN_INSTR_INDCTR, sep = " : ")
+# 
+# ARL$S_L_DEBT <- paste("Debt",  ARL$S_L_DEBT, sep = " : ")
+# 
+# ARL$SALES_REV_TURN_int <- paste("SALES REV",  ARL$SALES_REV_TURN_int, sep = " : ")
+# 
+# ARL$Active_years_int <- paste("Active years",  ARL$Active_years_int, sep = " : ")
+# 
+# ARL$years_to_maturity_int <- paste("R Ys to Maturity",  ARL$years_to_maturity_int, sep = " : ")
+# 
+# 
+# 
+# #======================Remove redundant features================================
+# 
+# 
+# 
+# 
+# ARL_final_feat <- 
+#   ARL %>% select(!(c(Med_S1 ,CPN_TYP, CRNCY, MAKE_WHOLE_CALL_TYPE,MUNI_FORM, SUPER_SINKER,
+#                                   ID_CUSIP, Mea_S1, CPN, CPN_TYP,CPN_FREQ,
+#                                  CRNCY, ISSUE_DT, MATURITY,
+#                              SPREAD_AT_ISSUANCE_TO_WORST, DUR_ADJ_MID, 
+#                      DUR_MID,ISSUE_PX, YIELD_ON_ISSUE_DATE, AMT_ISSUED,
+#                      MUNI_ISSUE_SIZE, IS_SUBORDINATED, 
+#                      SALES_REV_TURN, log_AMT_ISSUED, log_MUNI_ISSUE_SIZE,
+#                      SHORT_AND_LONG_TERM_DEBT, `MTY-YEARS`, `State Code`, Region, Y_l_day,
+#                      Active_years, years_to_maturity, Log_DEBT, Log_Sale_Turn, S_L_DEBT,
+#                      SALES_REV_TURN_int, RTG_FITCH_LONG, RTG_FITCH,DM)))
+# 
+# 
+# 
+# 
+# #==============Preparing the final dataset and transaction file=================
+# 
+# ARL_t <- ARL_final_feat %>% select(!c(year))
+# #Remove missing values
+# ARL_t <- ARL_t[complete.cases(ARL_t),]
+# 
+# #Convert all features to factors
+# ARL_t <- ARL_t %>% mutate_all(as.factor)
+# 
+# 
+# #convert dataframe to transaction format
+# Caltotextrtr <- ARL_t %>%
+#   unite(item, everything(), sep = ",")
+# 
+# write.csv(Caltotextrtr, ".../Caltotextrtr.csv", quote = FALSE, row.names = FALSE)
+# 
+# #Importing transaction file
+# 
+# tr_int <- read.transactions(".../Caltotextrtr.csv", format = "basket", sep = ",")
+
+```
+
+
+
+
+
+Filter rules with support and confidence thresholds 
+(based on the quantile of generated rules)
+```{r}
+
+PP.association.rules_ex <- apriori(tr_int, parameter = list(supp=0.01, conf=0.56, maxlen=10),appearance = list(default="lhs",rhs="S+(Extreme)"))
+
+NP.association.rules_ex <- apriori(tr_int, parameter = list(supp=0.01, conf=0.49, maxlen=10),appearance = list(default="lhs",rhs="S-(Extreme)"))
+
+
+```
+
+Filter rules one Itemset and  confidence 
+(supp and conf are added as filtering criteria in case we had different thresholds)
+```{r}
+
+#Positive itemsets
+Pquality_scores_ex <- quality(PP.association.rules_ex)
+
+Psupp_conf_ex <- Pquality_scores_ex$support * Pquality_scores_ex$confidence
+
+slot(PP.association.rules_ex, "quality")$supp_conf <- Psupp_conf_ex
+ 
+#Negative itemsets
+Nquality_scores_ex <- quality(NP.association.rules_ex)
+
+Nsupp_conf_ex <- Nquality_scores_ex$support * Nquality_scores_ex$confidence
+
+slot(NP.association.rules_ex, "quality")$supp_conf <- Nsupp_conf_ex
+
+
+
+
+```
+
+
+Filter rules with confidence greater than first quantile (Fig 3)
+```{r}
+
+# First filter by quality metrics, then by size
+PsubRules_temp <- PP.association.rules_ex[quality(PP.association.rules_ex)$confidence > 0.59 & 
+                                          quality(PP.association.rules_ex)$support > 0.01]
+PsubRules_ex_O2 <- PsubRules_temp[size(PsubRules_temp) == 2]
+
+NsubRules_temp <- NP.association.rules_ex[quality(NP.association.rules_ex)$confidence > 0.49 & 
+                                          quality(NP.association.rules_ex)$support > 0.01]
+NsubRules_ex_O2 <- NsubRules_temp[size(NsubRules_temp) == 2]
+
+# Get top 10 rules
+Ptop10subRules_ex_O2 <- head(PsubRules_ex_O2, n = 10, by = "supp_conf")
+Ntop10subRules_ex_O2 <- head(NsubRules_ex_O2, n = 10, by = "supp_conf")
+NP10_ex_O2 <- c(Ptop10subRules_ex_O2, Ntop10subRules_ex_O2)
+
+
+plot(NP10_ex_O2, method = "grouped", measure = "confidence", shading = "support")
+
+
+
+# png(file.path(base_path, "association_rules_extreme_O2.png"), 
+#     width = 1600, height = 1600, res = 300)
+# plot(NP10_ex_O2, method = "grouped", measure = "confidence", shading = "support")
+# dev.off()
+
+
+```
+
+
+
+Filter rules with confidence greater than first quantile
+```{r}
+
+PsubRules_ex <- PP.association.rules_ex[quality(PP.association.rules_ex)$confidence > 0.59 & quality(PP.association.rules_ex)$support > 0.01 ]
+
+NsubRules_ex <- NP.association.rules_ex[quality(NP.association.rules_ex)$confidence > 0.49 & quality(NP.association.rules_ex)$support > 0.01 ]
+
+# PNsubRules_ex <- PNP.association.rules_ex[quality(PNP.association.rules_ex)$confidence > 0.8 & quality(PNP.association.rules_ex)$support > 0.01  ]
+
+Ptop10subRules_ex <- head(PsubRules_ex, n = 10, by = "supp_conf")
+
+Ntop10subRules_ex <- head(NsubRules_ex, n = 10, by = "supp_conf")
+
+
+
+
+```
+
+
+plot the rules (Fig 1.2)
+```{r}
+
+
+
+inspect(head(Ptop10subRules_ex, n = 10, by = "supp_conf"))
+
+inspect(head(Ntop10subRules_ex, n = 10, by = "supp_conf"))
+
+plot(Ptop10subRules_ex, method = "paracoord", measure = "support", shading = "confidence")
+
+plot(Ntop10subRules_ex, method = "paracoord", measure = "support", shading = "confidence")
+
+
+
+
+
+
+```
+
+
+
+
+
+
+
+
+

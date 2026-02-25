@@ -1,0 +1,407 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-04-06"
+---
+
+```{r}
+library(arules)
+library(arulesViz)
+library(knitr)
+library(plyr)
+library(dplyr)
+library(RColorBrewer)
+library(stringr)
+library(quantmod)
+library(splines2)
+library(splines)
+library(mgcv)
+library (RQuantLib)
+library(tidyr)
+library(xts)
+library(plotly)
+library(lubridate)
+library (readxl)
+library(ggplot2)
+library(dplyr)
+library(scatterplot3d)
+library(tidyverse)
+library (zoo)
+library(plotly)
+library(writexl)
+library(YieldCurve)
+library(patchwork)
+library(gridExtra)
+library(stargazer)
+library(scales)
+library(pdfetch)
+library(xtable)
+```
+
+
+Load dataset
+```{r}
+
+ARL <- readRDS(".../ARL.rds")
+
+```
+
+
+Consistency
+```{r}
+
+
+ARL <- ARL %>% filter(year>=2016)
+
+
+
+ARL_final_feat <- 
+  ARL %>% 
+  dplyr::select(
+    -any_of(
+      c(
+        "CPN_TYP", "CRNCY", "MAKE_WHOLE_CALL_TYPE", "MUNI_FORM", "SUPER_SINKER",
+        "ID_CUSIP", "Mea_S1", "Mea_SL", "CPN", "CPN_FREQ",
+        "ISSUE_DT", "MATURITY",
+        "SPREAD_AT_ISSUANCE_TO_WORST", "DUR_ADJ_MID", 
+        "DUR_MID", "ISSUE_PX", "YIELD_ON_ISSUE_DATE", "AMT_ISSUED",
+        "MUNI_ISSUE_SIZE", "IS_SUBORDINATED", 
+        "SALES_REV_TURN", "log_AMT_ISSUED", "log_MUNI_ISSUE_SIZE",
+        "SHORT_AND_LONG_TERM_DEBT", "MTY-YEARS", "State Code", "Region", "Y_l_day",
+        "Active_years", "years_to_maturity", "Log_DEBT", "Log_Sale_Turn", "S_L_DEBT",
+        "SALES_REV_TURN_int", "RTG_FITCH_LONG", "RTG_FITCH", "DM", "Med_m_S1"
+      )
+    )
+  )
+
+# First, let's check the structure of the month column and convert if needed
+ARL_final_feat <- ARL_final_feat %>%
+  mutate(
+    # Extract numeric month from month column (assuming format like "Jan22", "Feb22", etc.)
+    month_num = case_when(
+      grepl("Jan", month, ignore.case = TRUE) ~ 1,
+      grepl("Feb", month, ignore.case = TRUE) ~ 2,
+      grepl("Mar", month, ignore.case = TRUE) ~ 3,
+      grepl("Apr", month, ignore.case = TRUE) ~ 4,
+      grepl("May", month, ignore.case = TRUE) ~ 5,
+      grepl("Jun", month, ignore.case = TRUE) ~ 6,
+      grepl("Jul", month, ignore.case = TRUE) ~ 7,
+      grepl("Aug", month, ignore.case = TRUE) ~ 8,
+      grepl("Sep", month, ignore.case = TRUE) ~ 9,
+      grepl("Oct", month, ignore.case = TRUE) ~ 10,
+      grepl("Nov", month, ignore.case = TRUE) ~ 11,
+      grepl("Dec", month, ignore.case = TRUE) ~ 12,
+      TRUE ~ as.numeric(month) # In case month is already numeric
+    ),
+    year_month = paste(year, sprintf("%02d", month_num), sep = "_")
+  )
+
+# Get unique year-month combinations
+year_months <- unique(ARL_final_feat$year_month)
+year_months <- sort(year_months) # Sort chronologically
+
+# Function to process data for each year-month
+process_monthly_data <- function(data, yr_month) {
+  monthly_data <- data %>% 
+    filter(year_month == yr_month) %>% 
+    dplyr::select(!c(year, month, year_month))
+  
+  # Remove missing values
+  monthly_data <- monthly_data[complete.cases(monthly_data),]
+  
+  # Convert all features to factors
+  monthly_data <- monthly_data %>% mutate_all(as.factor)
+  
+  return(monthly_data)
+}
+
+# Function to create transaction format and generate rules
+generate_monthly_rules <- function(monthly_data, yr_month) {
+  # Convert to transaction format
+  monthly_tr <- monthly_data %>%
+    unite(item, everything(), sep = ",")
+  
+  # Write temporary CSV (you can skip this if not needed)
+  temp_file <- paste0("temp_", yr_month, ".csv")
+  write.csv(monthly_tr, temp_file, quote = FALSE, row.names = FALSE)
+  
+  # Read as transactions
+  tr_monthly <- read.transactions(temp_file, format = "basket", sep = ",")
+  
+  # Generate positive and negative rules
+  PP_rules <- apriori(tr_monthly, 
+                      parameter = list(supp = 0.0001, conf = 0.0001, maxlen = 2),
+                      appearance = list(default = "lhs", rhs = "S+"))
+  
+  NP_rules <- apriori(tr_monthly, 
+                      parameter = list(supp = 0.0001, conf = 0.0001, maxlen = 2),
+                      appearance = list(default = "lhs", rhs = "S-"))
+  
+  # Filter S1 rules (size == 2)
+  P_S1_rules <- PP_rules[quality(PP_rules)$confidence > 0.0001 & 
+                         quality(PP_rules)$support > 0.0001 & 
+                         size(PP_rules) == 2]
+  
+  N_S1_rules <- NP_rules[quality(NP_rules)$confidence > 0.0001 & 
+                         quality(NP_rules)$support > 0.0001 & 
+                         size(NP_rules) == 2]
+  
+  # Clean up temporary file
+  file.remove(temp_file)
+  
+  return(list(positive = P_S1_rules, negative = N_S1_rules))
+}
+
+# Process all months and generate rules
+all_positive_rules <- list()
+all_negative_rules <- list()
+
+for(i in 1:length(year_months)) {
+  cat("Processing", year_months[i], "\n")
+  
+  # Process monthly data
+  monthly_data <- process_monthly_data(ARL_final_feat, year_months[i])
+  
+  # Skip if no data for this month
+  if(nrow(monthly_data) == 0) next
+  
+  # Generate rules
+  monthly_rules <- generate_monthly_rules(monthly_data, year_months[i])
+  
+  # Convert to dataframe and add time identifiers
+  if(length(monthly_rules$positive) > 0) {
+    pos_df <- as(monthly_rules$positive, "data.frame")
+    pos_df$year_month <- year_months[i]
+    pos_df$year <- as.numeric(substr(year_months[i], 1, 4))
+    pos_df$month <- as.numeric(substr(year_months[i], 6, 7))
+    pos_df$rules <- substr(pos_df$rules, 1, nchar(pos_df$rules) - 8)
+    all_positive_rules[[i]] <- pos_df
+  }
+  
+  if(length(monthly_rules$negative) > 0) {
+    neg_df <- as(monthly_rules$negative, "data.frame")
+    neg_df$year_month <- year_months[i]
+    neg_df$year <- as.numeric(substr(year_months[i], 1, 4))
+    neg_df$month <- as.numeric(substr(year_months[i], 6, 7))
+    neg_df$rules <- substr(neg_df$rules, 1, nchar(neg_df$rules) - 8)
+    all_negative_rules[[i]] <- neg_df
+  }
+}
+
+# Combine all results
+Consistency_df_P_S1_monthly <- do.call(rbind, all_positive_rules[!sapply(all_positive_rules, is.null)])
+Consistency_df_N_S1_monthly <- do.call(rbind, all_negative_rules[!sapply(all_negative_rules, is.null)])
+
+# Create date column for plotting
+Consistency_df_P_S1_monthly <- Consistency_df_P_S1_monthly %>%
+  mutate(date = as.Date(paste(year, month, "01", sep = "-")))
+
+Consistency_df_N_S1_monthly <- Consistency_df_N_S1_monthly %>%
+  mutate(date = as.Date(paste(year, month, "01", sep = "-")))
+
+
+
+
+
+
+
+```
+
+
+
+Fig 4
+```{r, fig.width=12, fig.height=8}
+# Define the new color schemes
+positive_rule_colors_new <- c(
+  "{Tax : FED TAXABLE/ST TAX-EXEMPT}"        = "#FF0000",   # Red (unchanged)
+  "{Pricing TYP : At Par}"                   = "#0000FF",   # Blue (unchanged)
+  "{S OID : Higher than 100}"                = "#00688B",   # SteelBlue
+  "{R Ys to Maturity : Higher than 14.4}"    = "#800020",   # Burgundy
+  "{Y_OID : Higher than 3.2}"                = "#FF4500",   # OrangeRed
+  "{Maturity OID : Higher than 17}"          = "#800080",   # Purple
+  "{S OID : 57_100}"                         = "#00BFFF",   # DeepSkyBlue
+  "{Maturity OID : 12.3_17}"                 = "#2F4F4F",   # DarkSlateGray
+  "{DU_Adj_MID : Higher than 7}"             = "#A52A2A",   # Brown
+  "{Y_OID : 2.4_3.2}"                        = "#556B2F",   # DarkOliveGreen
+  "{Call : Callable}"                        = "#8B4513",   # SaddleBrown
+  "{R Ys to Maturity : 9.4_14.4}"            = "#483D8B",   # DarkSlateBlue
+  "{Active years : Less than 1.1}"           = "#2E8B57",   # SeaGreen
+  "{Self Rep. Gr. : Not labelled}"           = "#8FBC8F",   # DarkSeaGreen
+  "{Issued Amt : Higher than 16}"            = "#D2691E"    # Chocolate
+)
+
+negative_rule_colors_new <- c(
+  "{S OID : Less than 17}"                   = "#8B0000",   # DarkRed
+  "{Y_OID : Less than 1.7}"                  = "#000080",   # Navy
+  "{Maturity OID : Less than 8}"             = "#8B008B",   # DarkMagenta
+  "{R Ys to Maturity : Less than 4.7}"       = "#FF8C00",   # DarkOrange
+  "{Call : Non-callable}"                    = "#000000",   # Black
+  "{Pricing TYP : At Premium}"               = "#4B0082",   # Indigo
+  "{R Ys to Maturity : 4.7_9.4}"             = "#B8860B",   # DarkGoldenrod
+  "{Tax : FED & ST TAX-EXEMPT}"              = "#008B8B",   # DarkCyan
+  "{Maturity OID : 8.2_12.3}"                = "#DC143C",   # Crimson
+  "{CPN : 5.8_8.5(%)}"                       = "#228B22",   # ForestGreen
+  "{S OID : 17_57}"                          = "#006400",   # DarkGreen
+  "{DU_Adj_MID : Less than 2.8}"             = "#191970",   # MidnightBlue
+  "{DU_Adj_MID : 4.8_7}"                     = "#808000",   # Olive
+  "{Issued Amt : Less than 14}"              = "#708090",   # SlateGray
+  "{Muni Issued Size : 17_18.7}"             = "#CD5C5C"    # IndianRed
+)
+
+# Plot positive rules - CONFIDENCE (no legend)
+p1 <- Consistency_df_P_S1_monthly %>%
+  filter(rules %in% names(positive_rule_colors_new)) %>%
+  ggplot(aes(x = date, y = confidence, color = rules)) +
+  geom_line(size = 1) +
+  scale_color_manual(values = positive_rule_colors_new) +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  scale_y_continuous(breaks = seq(0, 1, 0.2), labels = seq(0, 1, 0.2), limits = c(0, 1)) +
+  theme_minimal() +
+  labs(title = "",
+       x = "Date", 
+       y = "Confidence",
+       color = "Rules") +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(size = 14, margin = margin(r = 10)),
+        legend.position = "none",
+        plot.margin = margin(t = 10, r = 10, b = 15, l = 15))
+
+print(p1)
+
+# Plot positive rules - SUPPORT (no legend)
+p1_support <- Consistency_df_P_S1_monthly %>%
+  filter(rules %in% names(positive_rule_colors_new)) %>%
+  ggplot(aes(x = date, y = support, color = rules)) +
+  geom_line(size = 1) +
+  scale_color_manual(values = positive_rule_colors_new) +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  scale_y_continuous(breaks = seq(0, 1, 0.2), labels = seq(0, 1, 0.2), limits = c(0, 1)) +
+  theme_minimal() +
+  labs(title = "",
+       x = "Date", 
+       y = "Support",
+       color = "Rules") +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(size = 14, margin = margin(r = 10)),
+        legend.position = "none",
+        plot.margin = margin(t = 10, r = 10, b = 15, l = 15))
+
+print(p1_support)
+
+# Plot positive rules - LIFT (with legend)
+p1_lift <- Consistency_df_P_S1_monthly %>%
+  filter(rules %in% names(positive_rule_colors_new)) %>%
+  ggplot(aes(x = date, y = lift, color = rules)) +
+  geom_line(size = 1) +
+  scale_color_manual(values = positive_rule_colors_new) +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  theme_minimal() +
+  labs(title = "",
+       x = "Date", 
+       y = "Lift",
+       color = "Rules") +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(size = 14, margin = margin(r = 10)),
+        legend.position = "bottom",
+        legend.text = element_text(size = 13),
+        legend.title = element_text(size = 10),
+        legend.key.width = unit(0.6, "cm"),
+        legend.key.height = unit(0.25, "cm"),
+        legend.box.margin = margin(t = 2),
+        legend.margin = margin(t = 0, b = 0),
+        plot.margin = margin(t = 5, r = 5, b = 25, l = 10)) +
+  guides(color = guide_legend(ncol = 4, byrow = TRUE))
+
+print(p1_lift)
+
+# Plot negative rules - CONFIDENCE (no legend)
+p2 <- Consistency_df_N_S1_monthly %>%
+  filter(rules %in% names(negative_rule_colors_new)) %>%
+  ggplot(aes(x = date, y = confidence, color = rules)) +
+  geom_line(size = 1) +
+  scale_color_manual(values = negative_rule_colors_new) +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  scale_y_continuous(breaks = seq(0, 1, 0.2), labels = seq(0, 1, 0.2), limits = c(0, 1)) +
+  theme_minimal() +
+  labs(title = "",
+       x = "Date", 
+       y = "Confidence",
+       color = "Rules") +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(size = 14, margin = margin(r = 10)),
+        legend.position = "none",
+        plot.margin = margin(t = 10, r = 10, b = 15, l = 15))
+
+print(p2)
+
+# Plot negative rules - SUPPORT (no legend)
+p2_support <- Consistency_df_N_S1_monthly %>%
+  filter(rules %in% names(negative_rule_colors_new)) %>%
+  ggplot(aes(x = date, y = support, color = rules)) +
+  geom_line(size = 1) +
+  scale_color_manual(values = negative_rule_colors_new) +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  scale_y_continuous(breaks = seq(0, 1, 0.2), labels = seq(0, 1, 0.2), limits = c(0, 1)) +
+  theme_minimal() +
+  labs(title = "",
+       x = "Date", 
+       y = "Support",
+       color = "Rules") +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(size = 14, margin = margin(r = 10)),
+        legend.position = "none",
+        plot.margin = margin(t = 10, r = 10, b = 15, l = 15))
+
+print(p2_support)
+
+# Plot negative rules - LIFT (with legend)
+p2_lift <- Consistency_df_N_S1_monthly %>%
+  filter(rules %in% names(negative_rule_colors_new)) %>%
+  ggplot(aes(x = date, y = lift, color = rules)) +
+  geom_line(size = 1) +
+  scale_color_manual(values = negative_rule_colors_new) +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  theme_minimal() +
+  labs(title = "",
+       x = "Date", 
+       y = "Lift",
+       color = "Rules") +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(size = 14, margin = margin(r = 10)),
+        legend.position = "bottom",
+        legend.text = element_text(size = 13),
+        legend.title = element_text(size = 10),
+        legend.key.width = unit(0.6, "cm"),
+        legend.key.height = unit(0.25, "cm"),
+        legend.box.margin = margin(t = 2),
+        legend.margin = margin(t = 0, b = 0),
+        plot.margin = margin(t = 5, r = 5, b = 25, l = 10)) +
+  guides(color = guide_legend(ncol = 4, byrow = TRUE))
+
+print(p2_lift)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+

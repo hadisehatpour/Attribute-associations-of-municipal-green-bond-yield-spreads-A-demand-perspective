@@ -1,0 +1,164 @@
+---
+title: "Spreads' summary and trend"
+author: "Hadi"
+date: "2023-12-24"
+output: html_document
+---
+
+
+```{r}
+library(arules)
+library(arulesViz)
+library(knitr)
+library(plyr)
+library(dplyr)
+library(RColorBrewer)
+library(stringr)
+library(quantmod)
+library(splines2)
+library(splines)
+library(mgcv)
+library (RQuantLib)
+library(tidyr)
+library(xts)
+library(plotly)
+library(lubridate)
+library (readxl)
+library(ggplot2)
+library(dplyr)
+library(scatterplot3d)
+library(tidyverse)
+library(plot3D)
+library(rgl)
+library (zoo)
+library(plotly)
+library(writexl)
+library(YieldCurve)
+library(patchwork)
+library(gridExtra)
+library(stargazer)
+library(scales)
+library(pdfetch)
+library(xtable)
+```
+
+
+
+Load dataset
+```{r}
+
+
+MLFeat <- read_excel(path =".../Features.xlsx", na = c ("NA", "#N/A N/A", "#N/A Field Not Applicable", "#N/A Invalid Security"))
+
+California <- readRDS(".../California_s1_09_24.rds")
+
+
+
+
+```
+
+
+Trend of spread 1 (Fig 2)
+```{r}
+California %>% 
+  filter(year >= 2016) %>%
+  ggplot(aes(x = Date, y = S1)) +
+  geom_line(stat = "summary", fun = "median", aes(group = 1, color = "Median"), linetype = "solid", linewidth = 1, color = "darkgreen")+
+  geom_line(stat = "summary", fun = function(x) quantile(x, 0.25), color = "#99FF99", linetype = "dashed", linewidth = 0.7) +
+  geom_line(stat = "summary", fun = function(x) quantile(x, 0.75), color = "#99FF99", linetype = "dashed", linewidth = 0.7) +
+  theme_minimal() +
+  labs(x = "Date", y = "Median of Spreads") +
+  geom_hline(aes(yintercept = 0),  color = "grey", linewidth = 0.001, show.legend = FALSE) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +  # This line shows all years
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, size = 1),
+    panel.background = element_rect(fill = "white"),
+    axis.text.x = element_text(angle = 45, hjust = 1)  # Optional: rotate labels if crowded
+  ) +
+  coord_cartesian(ylim = c(-2, 2))
+
+
+
+```
+
+
+Spread 1 summary table
+```{r}
+
+S1_Stat <- California %>% filter(year>= 2016) %>% 
+  group_by(year) %>%
+  dplyr::summarise(
+    Min = round(min(S1, na.rm = TRUE), 3),
+    "1st Qu." = round(quantile(S1, 0.25, na.rm = TRUE), 3),
+    Max = round(max(S1, na.rm = TRUE), 3),
+    Mean = round(mean(S1, na.rm = TRUE), 3),
+    Median = round(median(S1, na.rm = TRUE), 3),
+    "3rd Qu." = round(quantile(S1, 0.75, na.rm = TRUE), 3),
+    SD = round(sd(S1, na.rm = TRUE), 3)
+  )
+S1_all <- California %>%
+  filter(year %in% c(2020, 2021, 2022, 2023)) %>% 
+  dplyr::summarise(
+    Min = round(min(S1, na.rm = TRUE), 3),
+    "1st Qu." = round(quantile(S1, 0.25, na.rm = TRUE), 3),
+    Max = round(max(S1, na.rm = TRUE), 3),
+    Mean = round(mean(S1, na.rm = TRUE), 3),
+    Median = round(median(S1, na.rm = TRUE), 3),
+    "3rd Qu." = round(quantile(S1, 0.75, na.rm = TRUE), 3),
+    SD = round(sd(S1, na.rm = TRUE), 3)
+  )
+
+S1_all$year <- "Total"
+S1_final_state <- rbind(S1_Stat, S1_all)
+
+#Overleaf table
+
+xtable(S1_final_state, digits = 4)
+
+```
+
+
+
+Distribution of Spread  (Fig 1)
+```{r}
+California %>%
+  filter(year >= 2016) %>%
+  ggplot(aes(x = S1)) +
+  # thicker density curve
+  geom_density(
+    
+    color = "darkgreen",
+    alpha = 0.1,
+    size  = 1    # increase line thickness
+  ) +
+  # median line with legend
+  geom_vline(
+    aes(xintercept = median(S1), color = "Median"),
+    linetype   = "dashed",
+    size       = 1,
+    show.legend= TRUE
+  ) +
+  scale_color_manual(
+    name   = NULL,
+    values = c("Median" = "red")
+  ) +
+  coord_cartesian(ylim = c(0, 0.5), xlim = c(-8, 8)) +
+  theme_minimal() +
+  labs(x = "Spread(%)", y = "Density") +
+  theme(
+    panel.border         = element_rect(color = "black", fill = NA, size = 1),
+    panel.background     = element_rect(fill = "white"),
+    legend.position      = c(1, 1),
+    legend.justification = c("right", "top"),
+    # draw a box around legend
+    legend.background    = element_rect(fill = alpha("white", 0.7), color = "black"),
+    legend.key           = element_rect(fill = NA, color = NA)
+  )
+
+
+```
+
+
+
+
+

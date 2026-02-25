@@ -1,0 +1,389 @@
+---
+title: "Spread Calculation"
+author: "Hadi"
+date: "2023-10-24"
+output: html_document
+---
+Load libraries
+```{r}
+library(splines2)
+library(splines)
+library(mgcv)
+library (RQuantLib)
+library(tidyr)
+library(xts)
+library(plotly)
+library(lubridate)
+library (readxl)
+library(ggplot2)
+library(dplyr)
+library(scatterplot3d)
+library(tidyverse)
+library(plot3D)
+library(rgl)
+library (zoo)
+library(plotly)
+library(writexl)
+library(YieldCurve)
+library(patchwork)
+library(gridExtra)
+library(stargazer)
+library(scales)
+library(pdfetch)
+library(xtable)
+```
+
+
+
+Importing Dataset
+```{r}
+
+features <- 
+  read_excel(path =".../Features.xlsx", na = c ("NA", "#N/A N/A", "#N/A Field Not Applicable", "#N/A Invalid Security"))
+
+Yield <- read_excel(path =".../Yields.xlsx")
+
+
+```
+
+
+Longitudinal yields
+```{r}
+
+#convert to longitudinal data format
+Yield <- Yield %>%  gather(key = "Date", value = "yield", -ID_CUSIP)
+
+#convert data format
+Yield$Date <- as.Date(as.numeric(Yield$Date), origin = "1899-12-30")
+
+#removing yields nulls
+Yield <- Yield[complete.cases(Yield$yield), ]
+
+#merge yield and feature dataset
+
+#merging Features and Yields with ID_CUSIP
+NMuni <- merge(Yield, features, by = "ID_CUSIP")
+
+#Labeling th missing state code
+NMuni$`State Code`[is.na(NMuni$`State Code`)] <- "AK"
+
+```
+
+Save dataset
+```{r}
+
+saveRDS(NMuni, ".../NMuni.rds" )
+
+```
+
+
+Subset California dataset based on coupon type
+
+```{r}
+California <- 
+  NMuni %>% filter(`State Code` == "CA", 
+                   CPN_TYP == c ("FIXED", "FIXED, OID", "ZERO COUPON, OID"))
+```
+
+Calculate Year fraction at day t
+```{r}
+for (i in 1:nrow(California)){
+  California$YF[i] <- yearFraction(ymd(California$Date[i]) 
+                                   , ymd(California$MATURITY[i]), dayCounters = 12)
+  
+}
+
+```
+
+
+Add PAR_AMT column to the data set
+```{r}
+California$PAR_AMT <- 100
+
+California <- California %>% filter(!(YF == 0))
+```
+
+
+remove the outliers based on the z scores (Fig B.1)
+```{r}
+California$Z_score <- scale(California$yield)
+California <- California %>% filter(abs(Z_score)< 3)
+```
+
+Save California dataset
+```{r}
+saverds(California, ".../California.rds")
+
+```
+
+
+
+Function for calculating PVs using the observed yield to maturity for approach 1
+year_fraction = tau_n
+```{r}
+bond_price_ytm_a1 <-
+function(ytm, year_fraction, coupon,
+         face_value, coupon_frequency, bond_type)
+{
+  
+  bond_price <- 0
+  n <- year_fraction*coupon_frequency
+  if (bond_type %in% c("FIXED", "FIXED, OID") ){
+    C <- face_value * coupon / coupon_frequency
+    if (n > 0) {
+      for (t in (seq(ifelse(n%%1 == 0.00, 1, n%%1), n, by = 1))/coupon_frequency){
+        discounted_cashflows <- C / ((1 + ytm ) ^ t)
+        bond_price <- bond_price + discounted_cashflows
+      }
+      final_cashflow <- (face_value) / ((1 + ytm ) ^ (n/coupon_frequency))
+      bond_price <- bond_price + final_cashflow
+    } else {
+      final_cashflow <- face_value + C  
+      bond_price <- final_cashflow
+    }
+  }
+  else if (bond_type == "ZERO COUPON, OID"){
+    n <- year_fraction
+    bond_price <- face_value / ((1 + ytm) ^ n)
+  }
+  
+  else {
+    stop("Unsupported")
+  }
+  
+  return(bond_price)
+}
+  
+
+
+```
+
+
+Calculate Green PVs based on the observed YTM 
+```{r}
+for (i in 1:nrow(California)){
+  
+  ytm <- California$yield[i]/100
+  year_fraction <- California$YF[i]
+  coupon <- as.numeric(California$CPN[i])/100
+  face_value <- as.numeric(California$PAR_AMT[i])
+  coupon_frequency <- as.numeric(California$CPN_FREQ[i])
+  bond_type <-California$CPN_TYP[i]
+  price_ytm <- 
+    bond_price_ytm_a1 (ytm = ytm, coupon = coupon,
+                                     face_value = face_value, year_fraction = year_fraction,
+                    coupon_frequency = coupon_frequency,
+                                     bond_type = bond_type)
+  California$GPV_1[i] <- price_ytm
+  
+} 
+
+```
+
+
+Function for calculating zero coupon yields
+```{r}
+zcb_eq_ytm_a1 <- function(zcb_ytm, year_fraction,
+                           face_value, bond_type, bond_price, 
+                          coupon, coupon_frequency) {
+  C <- face_value * coupon / coupon_frequency
+  if (bond_type %in% c("FIXED", "FIXED, OID", "ZERO COUPON, OID")) {
+    return(((1 + zcb_ytm) ^ year_fraction) - ((face_value + C) / bond_price))
+  } else {
+    stop("Unsupported bond_type")
+  }
+}
+
+
+
+
+```
+
+Calculate Equivalent ZCB YTM of green bonds in approach 1 for dataset
+```{r}
+for (i in 1:nrow(California)){
+   
+  year_fraction <- California$YF[i]
+  bond_price <- as.numeric(California$GPV_1[i])
+  face_value <- as.numeric(California$PAR_AMT[i])
+  bond_type <- California$CPN_TYP[i]
+  coupon_frequency <- as.numeric(California$CPN_FREQ[i])
+  coupon <- as.numeric(California$CPN[i])/100
+  result <- uniroot(zcb_eq_ytm_a1, interval = c(-1, 20),
+                     year_fraction= year_fraction, bond_type = bond_type,
+                    face_value= face_value, bond_price= bond_price, coupon = coupon, coupon_frequency = coupon_frequency)
+  
+  California$G_ZCB_YTM_1 [i] <- round(result$root, digits = 4)*100
+  
+}
+
+```
+
+
+Calculate  Reference Rates
+Import US Treasury Par yield Curve
+```{r}
+par_data <- read.csv(".../daily_par_yield-curve-rates-1990-2024.csv")
+
+names(par_data)[-1] <- c("0.083", "0.167", "0.231", "0.333", "0.500", "1", "2", "3",
+"5", "7", "10", "20", "30")
+
+par_data$Date <- as.Date(par_data$Date)
+
+par_data_mat <- as.matrix(par_data)
+par_data_mat <- par_data_mat[, -1]
+
+par_tby <- as.xts(par_data_mat, order.by = par_data$Date)
+
+par_tby <- na.approx(par_tby, na.rm = FALSE)
+```
+
+
+
+3D plot for US Treasury Par Yield Curve Rates (Fig C.1)
+```{r}
+
+par_tby %>%
+  data.matrix() %>% 
+  t() %>%
+  plot_ly(
+    x=as.Date(index(par_tby)),
+    y=as.numeric(colnames(par_tby)),
+    z=.,
+    type="surface"
+  ) %>%
+  plotly::layout(
+    title = "Treasury Par Yield Curve Rates",
+           scene = list(
+               xaxis = list(title = "Date", gridcolor = "rgb(255, 255, 255)",
+                            zerolinecolor = "rgb(255, 255, 255)",
+                            showbackground = TRUE,
+                            backgroundcolor = "rgb(240, 240,240)"),
+               yaxis = list(title = "Maturity", gridcolor = "rgb(255, 255, 255)",
+                            zerolinecolor = "rgb(255, 255, 255)",
+                            showbackground = TRUE,
+                            backgroundcolor = "rgb(230, 230,230)"),
+               zaxis = list(title = "Yield (%)", gridcolor = "rgb(255, 255, 255)",
+                            zerolinecolor = "rgb(255, 255, 255)",
+                            showbackground = TRUE,
+                            backgroundcolor = "rgb(220, 220,220)")
+               
+           ))
+
+```
+
+
+Visualization:
+Curve Fitting for a specific day to test the goodness of fit (US Treasury par yield) (Fig E.1)
+```{r}
+D <- "2023-03-17"
+m1 <- 1
+
+terms <-  sort(rep(c(30,20,10,7,6,3,2,1,0.5,0.25,0.1),1))
+
+#layout(matrix(c(1, 2, 3), ncol = 1, byrow = TRUE))
+
+#3_5 Percent Coupon Rate
+
+x_tr <- as.numeric(sort(names(par_tby))) 
+                                                
+y_tr <-  as.numeric(par_tby[D, sort(names(par_tby))])
+
+cuts <- summary(x_tr)[c(2,3,5)]
+
+spline_fit_tr <- lm(y_tr ~ bs(x_tr, degree = m1, knots = cuts))
+
+pred_tr <- predict(spline_fit_tr, newdata = data.frame(x_tr = terms), se.fit = TRUE)
+
+se_tr <- qnorm((1 + 0.95) / 2) * pred_tr$se.fit
+
+
+plot(x_tr,y_tr, xlab = "Terms (annualized)", ylab = "Yield (%)", ylim = c(0,2))
+
+ lines(terms, pred_tr$fit, col = "red")
+ lines(terms, pred_tr$fit + se_tr, col = "orange", lty = 2)
+ lines(terms, pred_tr$fit - se_tr, col = "orange", lty = 2)
+
+# Original legend with smaller text size
+legend("bottomright", legend = c("Smoothed Fit", paste(95, "% Confidence Intervals")),
+       col = c("red", "orange"), lty = c(1, 2), pch = c(NA, NA), lwd = c(2, 1), cex = 0.7)
+
+#Add vertical dashed lines at specific x values
+vertical_lines_x <- cuts 
+abline(v = vertical_lines_x, col = "grey", lty = "dashed")
+```
+
+
+Calculate the  equivalent US treasury yield for the green bonds each day
+```{r}
+for (i in 1:nrow(California)) {
+  x <- as.numeric(sort(names(par_tby)))
+  y <- as.numeric(par_tby[California$Date[i], 
+                                   sort(names(par_tby))])
+  cuts <- summary(x)[c(2,3,5)]
+  
+  tresury_spl_fit <- lm(y ~ bs(x, degree =3, knots = cuts))
+
+  
+  tresury_fitted_values <- predict(tresury_spl_fit, newdata = data.frame(x = as.numeric(California$YF[i])),
+                           se.fit = FALSE)
+  California$tresury_eq_yield[i] <-  tresury_fitted_values
+}
+```
+
+
+Calculate PVs based on the yields Treasury yield curve
+```{r}
+for (i in 1:nrow(California)){
+  
+  ytm <- California$tresury_eq_yield[i]/100
+  year_fraction <- California$YF[i]
+  coupon <- as.numeric(California$CPN[i])/100
+  face_value <- as.numeric(California$PAR_AMT[i])
+  coupon_frequency <- as.numeric(California$CPN_FREQ[i])
+  bond_type <- California$CPN_TYP[i]
+  price_ref1 <- 
+    bond_price_ytm_a1 (ytm = ytm, coupon = coupon,
+                                     face_value = face_value,
+                    year_fraction = year_fraction, 
+                    coupon_frequency = coupon_frequency,
+                                     bond_type = bond_type)
+  California$RPV_1[i] <- price_ref1
+  
+} 
+
+```
+
+
+Calculate Equivalent reference ZCBYTM1 
+```{r}
+for (i in 1:nrow(California)){
+   
+  
+  year_fraction <- California$YF[i]
+  bond_price <- as.numeric(California$RPV_1[i])
+  face_value <- as.numeric(California$PAR_AMT[i])
+  bond_type <- California$CPN_TYP[i]
+  coupon <- as.numeric(California$CPN[i])/100
+  coupon_frequency <- as.numeric(California$CPN_FREQ[i])
+  result <- uniroot(zcb_eq_ytm_a1, interval = c(-1, 20),
+                     year_fraction= year_fraction, bond_type = bond_type,
+                    face_value= face_value, bond_price= bond_price, coupon = coupon, coupon_frequency = coupon_frequency)
+  California$R_ZCB_YTM_1 [i] <- round(result$root, digits = 4)*100
+  
+}
+
+```
+
+Calculate Spread 1 and simple differences of the GZYTM and RZYTM
+```{r}
+
+California$S1 <- California$G_ZCB_YTM_1 - California$R_ZCB_YTM_1
+
+```
+
+
+
+ 
+
+

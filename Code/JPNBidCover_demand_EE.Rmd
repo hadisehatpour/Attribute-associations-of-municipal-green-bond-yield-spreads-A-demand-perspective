@@ -1,0 +1,2819 @@
+---
+title: "Supscription (Demand) analysis"
+output: html_document
+date: "2025-06-10"
+---
+
+```{r}
+
+library(knitr)
+library(dplyr)
+library(RColorBrewer)
+library(stringr)
+library(quantmod)
+library(splines2)
+library(splines)
+library(mgcv)
+library (RQuantLib)
+library(tidyr)
+library(xts)
+library(plotly)
+library(lubridate)
+library (readxl)
+library(ggplot2)
+library(dplyr)
+library(scatterplot3d)
+library(tidyverse)
+library (zoo)
+library(plotly)
+library(writexl)
+library(YieldCurve)
+library(patchwork)
+library(gridExtra)
+library(stargazer)
+library(scales)
+library(pdfetch)
+library(xtable)
+library(broom)
+library(corrplot)
+library(here)
+library(forecast)
+library(dynlm)
+library(corrplot)
+library(lmtest)
+library(forecast)
+
+
+```
+
+Load datasets
+```{r}
+
+MLFeat   <- read_excel(".../Features.xlsx",
+                       na = c("NA","#N/A N/A","#N/A Field Not Applicable","#N/A Invalid Security"))
+
+us_jpn   <- read_excel(".../supscription.xlsx",
+                       na = c("NA","#N/A N/A","#N/A Field Not Applicable","#N/A Invalid Security"))
+
+ARL      <- readRDS(".../ARL.rds")
+controls <- read_excel(".../controls_values.xlsx",
+                       na = c("NA","#N/A N/A","#N/A Field Not Applicable","#N/A Invalid Security"))
+
+
+
+
+```
+
+
+
+```{r}
+
+# ================================
+# SETUP: PARAMETERS
+# ================================
+
+# Set thresholds
+positive_threshold <- 0.8
+negative_threshold <- 0.8
+
+# Study window
+study_start <- as.Date("2016-01-01")
+study_end <- as.Date("2024-12-31")
+
+# ================================
+# SETUP: PREPARE DATA
+# ================================
+
+# Convert dates
+ARL <- ARL %>%
+  mutate(
+    ISSUE_DT = as.Date(ISSUE_DT),
+    MATURITY = as.Date(MATURITY)
+  )
+
+
+# ================================
+# SETUP: CREATE ACTIVE MONTHS DATASET
+# ================================
+
+# Calculate total months active for each CUSIP from 2016 onwards
+active_months <- ARL %>%
+  filter(year >= 2016) %>%
+  group_by(ID_CUSIP) %>%
+  summarise(
+    total_months_active = n(),
+    first_year = min(year),
+    last_year = max(year),
+    .groups = "drop"
+  )
+
+
+# ================================
+# SECOND-ORDER RULES - POSITIVE
+# ================================
+
+# ✅ Positive Second-Order Rule 1
+# Rule: {Tax : FED TAXABLE/ST TAX-EXEMPT} => {S+}
+p_second_rule1 <- active_months %>%
+  left_join(
+    ARL %>%
+      filter(year >= "2016", 
+             Med_m_SL == "S+",
+             MUNI_TAX_PROV == "Tax : FED TAXABLE/ST TAX-EXEMPT") %>%
+      group_by(ID_CUSIP) %>%
+      summarise(months_positive = n(), .groups = "drop"),
+    by = "ID_CUSIP"
+  ) %>%
+  replace_na(list(months_positive = 0)) %>%
+  mutate(
+    ratio_positive = months_positive / total_months_active,
+    rule_id = "p_second_rule1"
+  ) %>%
+  filter(ratio_positive >= positive_threshold) %>%
+  left_join(
+    ARL %>%
+      filter(MUNI_TAX_PROV == "Tax : FED TAXABLE/ST TAX-EXEMPT") %>%
+      dplyr::select(ID_CUSIP, ISSUE_DT, YIELD_ON_ISSUE_DATE) %>%
+      distinct(ID_CUSIP, .keep_all = TRUE),
+    by = "ID_CUSIP"
+  )
+
+# ✅ Positive Second-Order Rule 2
+# Rule: {Pricing TYP : At Par} => {S+}
+p_second_rule2 <- active_months %>%
+  left_join(
+    ARL %>%
+      filter(year >= "2016", 
+             Med_m_SL == "S+",
+             Iss_pri._spread == "Pricing TYP : At Par") %>%
+      group_by(ID_CUSIP) %>%
+      summarise(months_positive = n(), .groups = "drop"),
+    by = "ID_CUSIP"
+  ) %>%
+  replace_na(list(months_positive = 0)) %>%
+  mutate(
+    ratio_positive = months_positive / total_months_active,
+    rule_id = "p_second_rule2"
+  ) %>%
+  filter(ratio_positive >= positive_threshold) %>%
+  left_join(
+    ARL %>%
+      filter(Iss_pri._spread == "Pricing TYP : At Par") %>%
+      dplyr::select(ID_CUSIP, ISSUE_DT, YIELD_ON_ISSUE_DATE) %>%
+      distinct(ID_CUSIP, .keep_all = TRUE),
+    by = "ID_CUSIP"
+  )
+
+# ================================
+# SECOND-ORDER RULES - NEGATIVE
+# ================================
+
+# ❗ Negative Second-Order Rule 1
+# Rule: {S OID : Less than 17} => {S-}
+n_second_rule1 <- active_months %>%
+  left_join(
+    ARL %>%
+      filter(year >= "2016", 
+             Med_m_SL == "S-",
+             S_AT_Iss == "S OID : Less than 17") %>%
+      group_by(ID_CUSIP) %>%
+      summarise(months_negative = n(), .groups = "drop"),
+    by = "ID_CUSIP"
+  ) %>%
+  replace_na(list(months_negative = 0)) %>%
+  mutate(
+    ratio_negative = months_negative / total_months_active,
+    rule_id = "n_second_rule1"
+  ) %>%
+  filter(ratio_negative >= negative_threshold) %>%
+  left_join(
+    ARL %>%
+      filter(S_AT_Iss == "S OID : Less than 17") %>%
+      dplyr::select(ID_CUSIP, ISSUE_DT, YIELD_ON_ISSUE_DATE) %>%
+      distinct(ID_CUSIP, .keep_all = TRUE),
+    by = "ID_CUSIP"
+  )
+
+# ❗ Negative Second-Order Rule 2
+# Rule: {Y_OID : Less than 1.7} => {S-}
+n_second_rule2 <- active_months %>%
+  left_join(
+    ARL %>%
+      filter(year >= "2016", 
+             Med_m_SL == "S-",
+             Y_OID == "Y_OID :  Less than 1.7") %>%
+      group_by(ID_CUSIP) %>%
+      summarise(months_negative = n(), .groups = "drop"),
+    by = "ID_CUSIP"
+  ) %>%
+  replace_na(list(months_negative = 0)) %>%
+  mutate(
+    ratio_negative = months_negative / total_months_active,
+    rule_id = "n_second_rule2"
+  ) %>%
+  filter(ratio_negative >= negative_threshold) %>%
+  left_join(
+    ARL %>%
+      filter(Y_OID == "Y_OID :  Less than 1.7") %>%
+      dplyr::select(ID_CUSIP, ISSUE_DT, YIELD_ON_ISSUE_DATE) %>%
+      distinct(ID_CUSIP, .keep_all = TRUE),
+    by = "ID_CUSIP"
+  )
+
+
+
+
+# ================================
+# THIRD-ORDER RULES - POSITIVE
+# ================================
+
+# ✅ Positive Third-Order Rule 1
+# Rule: {Pricing TYP : At Par, Tax : FED TAXABLE/ST TAX-EXEMPT} => {S+}
+p_third_rule1 <- active_months %>%
+  left_join(
+    ARL %>%
+      filter(year >= 2016,
+             Iss_pri._spread == "Pricing TYP : At Par",
+             MUNI_TAX_PROV == "Tax : FED TAXABLE/ST TAX-EXEMPT",
+             Med_m_SL == "S+") %>%
+      group_by(ID_CUSIP) %>%
+      summarise(months_positive = n(), .groups = "drop"),
+    by = "ID_CUSIP"
+  ) %>%
+  replace_na(list(months_positive = 0)) %>%
+  mutate(
+    ratio_positive = months_positive / total_months_active,
+    rule_id = "p_third_rule1"
+  ) %>%
+  filter(ratio_positive >= positive_threshold) %>%
+  left_join(
+    ARL %>%
+      filter(Iss_pri._spread == "Pricing TYP : At Par",
+             MUNI_TAX_PROV == "Tax : FED TAXABLE/ST TAX-EXEMPT") %>%
+      dplyr::select(ID_CUSIP, ISSUE_DT, YIELD_ON_ISSUE_DATE) %>%
+      distinct(ID_CUSIP, .keep_all = TRUE),
+    by = "ID_CUSIP"
+  )
+
+# ✅ Positive Third-Order Rule 2
+# Rule: {Market : REVENUE BONDS, Tax : FED TAXABLE/ST TAX-EXEMPT} => {S+}
+p_third_rule2 <- active_months %>%
+  left_join(
+    ARL %>%
+      filter(year >= 2016,
+             MARKET_ISSUE == "Market : REVENUE BONDS",
+             MUNI_TAX_PROV == "Tax : FED TAXABLE/ST TAX-EXEMPT",
+             Med_m_SL == "S+") %>%
+      group_by(ID_CUSIP) %>%
+      summarise(months_positive = n(), .groups = "drop"),
+    by = "ID_CUSIP"
+  ) %>%
+  replace_na(list(months_positive = 0)) %>%
+  mutate(
+    ratio_positive = months_positive / total_months_active,
+    rule_id = "p_third_rule2"
+  ) %>%
+  filter(ratio_positive >= positive_threshold) %>%
+  left_join(
+    ARL %>%
+      filter(MARKET_ISSUE == "Market : REVENUE BONDS",
+             MUNI_TAX_PROV == "Tax : FED TAXABLE/ST TAX-EXEMPT") %>%
+      dplyr::select(ID_CUSIP, ISSUE_DT, YIELD_ON_ISSUE_DATE) %>%
+      distinct(ID_CUSIP, .keep_all = TRUE),
+    by = "ID_CUSIP"
+  )
+
+# ================================
+# THIRD-ORDER RULES - NEGATIVE
+# ================================
+
+# ❗ Negative Third-Order Rule 1
+# Rule: {S OID : Less than 17, Call : Non-callable} => {S-}
+n_third_rule1 <- active_months %>%
+  left_join(
+    ARL %>%
+      filter(year >= 2016,
+             S_AT_Iss == "S OID : Less than 17",
+             CALLABLE == "Call : Non-callable",
+             Med_m_SL == "S-") %>%
+      group_by(ID_CUSIP) %>%
+      summarise(months_negative = n(), .groups = "drop"),
+    by = "ID_CUSIP"
+  ) %>%
+  replace_na(list(months_negative = 0)) %>%
+  mutate(
+    ratio_negative = months_negative / total_months_active,
+    rule_id = "n_third_rule1"
+  ) %>%
+  filter(ratio_negative >= negative_threshold) %>%
+  left_join(
+    ARL %>%
+      filter(S_AT_Iss == "S OID : Less than 17",
+             CALLABLE == "Call : Non-callable"
+             ) %>%
+      dplyr::select(ID_CUSIP, ISSUE_DT, YIELD_ON_ISSUE_DATE) %>%
+      distinct(ID_CUSIP, .keep_all = TRUE),
+    by = "ID_CUSIP"
+  )
+
+# ❗ Negative Third-Order Rule 2
+# Rule: {R Ys to Maturity < 4.7, S OID : Less than 17} => {S-}
+n_third_rule2 <- active_months %>%
+  left_join(
+    ARL %>%
+      filter(year >= 2016,
+             years_to_maturity_int == "R Ys to Maturity :  Less than 4.7",  
+             S_AT_Iss == "S OID : Less than 17",
+             Med_m_SL == "S-") %>%
+      group_by(ID_CUSIP) %>%
+      summarise(months_negative = n(), .groups = "drop"),
+    by = "ID_CUSIP"
+  ) %>%
+  replace_na(list(months_negative = 0)) %>%
+  mutate(
+    ratio_negative = months_negative / total_months_active,
+    rule_id = "n_third_rule2"
+  ) %>%
+  filter(ratio_negative >= negative_threshold) %>%
+  left_join(
+    ARL %>%
+      filter(years_to_maturity_int == "R Ys to Maturity :  Less than 4.7",
+             S_AT_Iss == "S OID : Less than 17") %>%
+      dplyr::select(ID_CUSIP, ISSUE_DT, YIELD_ON_ISSUE_DATE) %>%
+      distinct(ID_CUSIP, .keep_all = TRUE),
+    by = "ID_CUSIP"
+  )
+
+# ================================
+# FOURTH-ORDER RULES - POSITIVE
+# ================================
+
+# ✅ Positive Fourth-Order Rule 1
+# Rule: {Market : REVENUE BONDS, Pricing TYP : At Par, Tax : FED TAXABLE/ST TAX-EXEMPT} => {S+}
+p_fourth_rule1 <- active_months %>%
+  left_join(
+    ARL %>%
+      filter(year >= 2016,
+             MARKET_ISSUE == "Market : REVENUE BONDS",
+             Iss_pri._spread == "Pricing TYP : At Par",
+             MUNI_TAX_PROV == "Tax : FED TAXABLE/ST TAX-EXEMPT",
+             Med_m_SL == "S+") %>%
+      group_by(ID_CUSIP) %>%
+      summarise(months_positive = n(), .groups = "drop"),
+    by = "ID_CUSIP"
+  ) %>%
+  replace_na(list(months_positive = 0)) %>%
+  mutate(
+    ratio_positive = months_positive / total_months_active,
+    rule_id = "p_fourth_rule1"
+  ) %>%
+  filter(ratio_positive >= positive_threshold) %>%
+  left_join(
+    ARL %>%
+      filter(MARKET_ISSUE == "Market : REVENUE BONDS",
+             Iss_pri._spread == "Pricing TYP : At Par",
+             MUNI_TAX_PROV == "Tax : FED TAXABLE/ST TAX-EXEMPT") %>%
+      dplyr::select(ID_CUSIP, ISSUE_DT, YIELD_ON_ISSUE_DATE) %>%
+      distinct(ID_CUSIP, .keep_all = TRUE),
+    by = "ID_CUSIP"
+  )
+
+# ================================
+# FOURTH-ORDER RULES - NEGATIVE
+# ================================
+
+# ❗ Negative Fourth-Order Rule 1
+# Rule: {Call : Non-callable, FIN. TYP : NEW MONEY, S OID : Less than 17} => {S-}
+n_fourth_rule1 <- active_months %>%
+  left_join(
+    ARL %>%
+      filter(year >= 2016,
+             CALLABLE == "Call : Non-callable",
+             FINANCING_TYPE == "FIN. TYP : NEW MONEY",
+             S_AT_Iss == "S OID : Less than 17",
+             Med_m_SL == "S-") %>%
+      group_by(ID_CUSIP) %>%
+      summarise(months_negative = n(), .groups = "drop"),
+    by = "ID_CUSIP"
+  ) %>%
+  replace_na(list(months_negative = 0)) %>%
+  mutate(
+    ratio_negative = months_negative / total_months_active,
+    rule_id = "n_fourth_rule1"
+  ) %>%
+  filter(ratio_negative >= negative_threshold) %>%
+  left_join(
+    ARL %>%
+      filter(CALLABLE == "Call : Non-callable",
+             FINANCING_TYPE == "FIN. TYP : NEW MONEY",
+             S_AT_Iss == "S OID : Less than 17") %>%
+      dplyr::select(ID_CUSIP, ISSUE_DT, YIELD_ON_ISSUE_DATE) %>%
+      distinct(ID_CUSIP, .keep_all = TRUE),
+    by = "ID_CUSIP"
+  )
+
+# ❗ Negative Fourth-Order Rule 2
+# Rule: {Call : Non-callable, CPN : ≤ 5.85(%), S OID : Less than 17} => {S-}
+n_fourth_rule2 <- active_months %>%
+  left_join(
+    ARL %>%
+      filter(year >= 2016,
+             CALLABLE == "Call : Non-callable",
+             CPN_Group == "CPN : 5_8.5(%)",
+             S_AT_Iss == "S OID : Less than 17",
+             Med_m_SL == "S-") %>%
+      group_by(ID_CUSIP) %>%
+      summarise(months_negative = n(), .groups = "drop"),
+    by = "ID_CUSIP"
+  ) %>%
+  replace_na(list(months_negative = 0)) %>%
+  mutate(
+    ratio_negative = months_negative / total_months_active,
+    rule_id = "n_fourth_rule2"
+  ) %>%
+  filter(ratio_negative >= negative_threshold) %>%
+  left_join(
+    ARL %>%
+      filter(CALLABLE == "Call : Non-callable",
+             CPN_Group == "CPN : 5_8.5(%)",
+             S_AT_Iss == "S OID : Less than 17") %>%
+      dplyr::select(ID_CUSIP, ISSUE_DT, YIELD_ON_ISSUE_DATE) %>%
+      distinct(ID_CUSIP, .keep_all = TRUE),
+    by = "ID_CUSIP"
+  )
+
+
+```
+
+
+
+```{r}
+# ================================
+# ADD BOND ATTRIBUTES TO INDIVIDUAL RULE DATASETS
+# ================================
+
+# Prepare features for merging
+features_to_merge <- MLFeat %>%
+  dplyr::select(
+    ID_CUSIP,
+    MATURITY,
+    MUNI_TAX_PROV,
+    CALLABLE,
+    MARKET_ISSUE,
+    FINANCING_TYPE
+  ) %>%
+  distinct(ID_CUSIP, .keep_all = TRUE)
+
+# Add attributes to all rule datasets
+p_second_rule1 <- p_second_rule1 %>%
+  left_join(features_to_merge, by = "ID_CUSIP")
+
+p_second_rule2 <- p_second_rule2 %>%
+  left_join(features_to_merge, by = "ID_CUSIP")
+
+n_second_rule1 <- n_second_rule1 %>%
+  left_join(features_to_merge, by = "ID_CUSIP")
+
+n_second_rule2 <- n_second_rule2 %>%
+  left_join(features_to_merge, by = "ID_CUSIP")
+
+p_third_rule1 <- p_third_rule1 %>%
+  left_join(features_to_merge, by = "ID_CUSIP")
+
+p_third_rule2 <- p_third_rule2 %>%
+  left_join(features_to_merge, by = "ID_CUSIP")
+
+n_third_rule1 <- n_third_rule1 %>%
+  left_join(features_to_merge, by = "ID_CUSIP")
+
+n_third_rule2 <- n_third_rule2 %>%
+  left_join(features_to_merge, by = "ID_CUSIP")
+
+p_fourth_rule1 <- p_fourth_rule1 %>%
+  left_join(features_to_merge, by = "ID_CUSIP")
+
+n_fourth_rule1 <- n_fourth_rule1 %>%
+  left_join(features_to_merge, by = "ID_CUSIP")
+
+n_fourth_rule2 <- n_fourth_rule2 %>%
+  left_join(features_to_merge, by = "ID_CUSIP")
+
+
+```
+
+
+
+REGRESSION DATASET
+```{r}
+
+
+# ================================
+# REGRESSION DATASET CONSTRUCTION
+# GROUP: Positive Second-Order Rule 1
+# Rule: {Tax : FED TAXABLE/ST TAX-EXEMPT} => {S+}
+# ================================
+# Base dataset from the group
+base_data <- p_second_rule1 %>%
+  dplyr::select(ID_CUSIP, ISSUE_DT, YIELD_ON_ISSUE_DATE) %>%
+  arrange(ISSUE_DT)
+
+# ================================
+# TREASURY AUCTION DATA MATCHING
+# ================================
+# Function to find closest prior auction data
+find_closest_prior_auction <- function(issue_dates, auction_data, date_col, value_col) {
+  result <- numeric(length(issue_dates))
+  
+  # Convert date columns to Date type 
+  if(!inherits(auction_data[[date_col]], "Date")) {
+    auction_data[[date_col]] <- as.Date(auction_data[[date_col]])
+  }
+  
+  if(!inherits(issue_dates, "Date")) {
+    issue_dates <- as.Date(issue_dates)
+  }
+  
+  for(i in seq_along(issue_dates)) {
+    issue_date <- issue_dates[i]
+    
+    # Skip if issue_date is NA
+    if(is.na(issue_date)) {
+      result[i] <- NA
+      next
+    }
+    
+    # Find auctions before or on the issue date
+    # Remove any NA dates first
+    valid_auctions <- auction_data[!is.na(auction_data[[date_col]]), ]
+    
+    if(nrow(valid_auctions) > 0) {
+      prior_auctions <- valid_auctions[valid_auctions[[date_col]] <= issue_date, ]
+      
+      if(nrow(prior_auctions) > 0) {
+        # Get the most recent auction
+        closest_idx <- which.max(prior_auctions[[date_col]])
+        result[i] <- prior_auctions[[value_col]][closest_idx]
+      } else {
+        result[i] <- NA
+      }
+    } else {
+      result[i] <- NA
+    }
+  }
+  
+  return(result)
+}
+
+# Match Japanese Treasury auction data
+
+base_data$JPN_Treasury_BidCover <- find_closest_prior_auction(
+  base_data$ISSUE_DT,
+  us_jpn,                    
+  "Date(jp)",               
+  "JNJBIYBC_Index"          
+)
+
+# Match US Treasury auction data  
+base_data$US_Treasury_BidCover <- find_closest_prior_auction(
+  base_data$ISSUE_DT,
+  us_jpn,                    
+  "Date(us)",                
+  "USN10YBC_Index"          
+)
+
+# ================================
+# MACRO VARIABLES ON ISSUE DATE
+# ================================
+
+# Function to match macro variables on issue date
+match_macro_variable <- function(issue_dates, control_data, date_col, value_col) {
+  # Remove rows with NA dates or values
+  valid_rows <- !is.na(control_data[[date_col]]) & !is.na(control_data[[value_col]])
+  control_data <- control_data[valid_rows, ]
+  
+  # Check if we have any data left
+  if(nrow(control_data) == 0) {
+    return(rep(NA, length(issue_dates)))
+  }
+  
+  # Sort control_data by date
+  control_data <- control_data[order(control_data[[date_col]]), ]
+  
+  # Ensure dates are in proper format
+  control_dates <- as.Date(control_data[[date_col]])
+  issue_dates <- as.Date(issue_dates)
+  
+  # Remove any remaining NAs after date conversion
+  if(any(is.na(control_dates))) {
+    valid_dates <- !is.na(control_dates)
+    control_data <- control_data[valid_dates, ]
+    control_dates <- control_dates[valid_dates]
+  }
+  
+  # Check again if we have data
+  if(length(control_dates) == 0) {
+    return(rep(NA, length(issue_dates)))
+  }
+  
+  # Use findInterval to find the position of each issue_date
+  positions <- findInterval(issue_dates, control_dates)
+  
+  # Handle cases where position is 0 (no prior data available)
+  result <- ifelse(positions == 0, 
+                   NA, 
+                   control_data[[value_col]][positions])
+  
+  return(result)
+}
+
+
+# Add macro variables
+base_data$US_FedFundsRate <- match_macro_variable(
+  base_data$ISSUE_DT,
+  controls,
+  "Date",  
+  "US_fed_funds_effe_rate"
+)
+
+base_data$BOJ_FundRate <- match_macro_variable(
+  base_data$ISSUE_DT,
+  controls,
+  "Date",  
+  "BOJ_rate"
+)
+
+base_data$DXY <- match_macro_variable(
+  base_data$ISSUE_DT,
+  controls,
+  "Date",  
+  "DXY"
+)
+
+base_data$Nikkei_Index <- match_macro_variable(
+  base_data$ISSUE_DT,
+  controls,
+  "Date",  
+  "NKY_Index"
+)
+
+base_data$SP500_Index <- match_macro_variable(
+  base_data$ISSUE_DT,
+  controls,
+  "Date",  
+  "SPX"
+)
+
+base_data$CPI_US <- match_macro_variable(
+  base_data$ISSUE_DT,
+  controls,
+  "Date",  
+  "CPI_CHNG_Index"
+)
+
+base_data$CPI_JP <- match_macro_variable(
+  base_data$ISSUE_DT,
+  controls,
+  "Date",  
+  "JN_CPI_MOM_Index"
+)
+
+base_data$TradeDeficit_JP_US <- match_macro_variable(
+  base_data$ISSUE_DT,
+  controls,
+  "Date",  
+  "TBBLJAPN_Index"
+)
+
+base_data$usdjpy <- match_macro_variable(
+  base_data$ISSUE_DT,
+  controls,
+  "Date",  
+  "USDJPY_CURNCY" 
+)
+
+
+```
+
+
+
+```{r}
+
+# ================================
+#  REGRESSION DATASETS FOR ALL GROUPS
+# ================================
+
+# Function to create regression dataset for bonds group
+create_regression_data <- function(group_data, group_name) {
+  # Base dataset from the group (now includes bond attributes)
+  base_data <- group_data %>%
+    dplyr::select(ID_CUSIP, ISSUE_DT, YIELD_ON_ISSUE_DATE) %>%
+    arrange(ISSUE_DT)
+  
+  # Add treasury auction data
+  base_data$JPN_Treasury_BidCover <- find_closest_prior_auction(
+    base_data$ISSUE_DT, us_jpn, "Date(jp)", "JNJBIYBC_Index")
+  
+  base_data$US_Treasury_BidCover <- find_closest_prior_auction(
+    base_data$ISSUE_DT, us_jpn, "Date(us)", "USN10YBC_Index")
+  
+  # Add macro variables
+  macro_vars <- c("US_fed_funds_effe_rate", "BOJ_rate", "DXY", "NKY_Index", 
+                  "SPX", "CPI_CHNG_Index", "JN_CPI_MOM_Index", 
+                  "TBBLJAPN_Index", "USDJPY_CURNCY")
+  
+  var_names <- c("US_FedFundsRate", "BOJ_FundRate", "DXY", "Nikkei_Index",
+                 "SP500_Index", "CPI_US", "CPI_JP", "TradeDeficit_JP_US", "usdjpy")
+  
+  for(i in seq_along(macro_vars)) {
+    base_data[[var_names[i]]] <- match_macro_variable(
+      base_data$ISSUE_DT, controls, "Date", macro_vars[i])
+  }
+  
+  # Aggregate by issue date (median yield, first value for others)
+  # Note: We aggregate ONLY the numeric variables here
+  agg_data <- base_data %>%
+    group_by(ISSUE_DT) %>%
+    summarise(
+      YIELD_ON_ISSUE_DATE = median(YIELD_ON_ISSUE_DATE, na.rm = TRUE),
+      JPN_Treasury_BidCover = first(JPN_Treasury_BidCover),
+      US_Treasury_BidCover = first(US_Treasury_BidCover),
+      US_FedFundsRate = first(US_FedFundsRate),
+      BOJ_FundRate = first(BOJ_FundRate),
+      DXY = first(DXY),
+      Nikkei_Index = first(Nikkei_Index),
+      SP500_Index = first(SP500_Index),
+      CPI_US = first(CPI_US),
+      CPI_JP = first(CPI_JP),
+      TradeDeficit_JP_US = first(TradeDeficit_JP_US),
+      usdjpy = first(usdjpy),
+      bond_count = n(),
+      .groups = 'drop'
+    ) %>%
+    arrange(ISSUE_DT)
+  
+  return(agg_data)
+}
+
+# Create datasets for all groups
+P1 <- create_regression_data(p_second_rule1, "P2")  
+N1 <- create_regression_data(n_second_rule1, "N2")
+P2 <- create_regression_data(p_third_rule1, "P3")
+N2 <- create_regression_data(n_third_rule1, "N3")
+P3 <- create_regression_data(p_fourth_rule1, "P4")
+N3 <- create_regression_data(n_fourth_rule1, "N4")
+```
+
+
+
+Statestical summary of that datasets (Table 4)
+```{r}
+
+
+# ================================
+# STATISTICAL SUMMARY TABLE FOR ALL GROUPS
+# ================================
+
+create_summary_stats_table <- function() {
+  
+  # Define variables (exclude BOJ_FundRate)
+  vars_to_summarize <- c("YIELD_ON_ISSUE_DATE", "JPN_Treasury_BidCover", "US_Treasury_BidCover", 
+                        "US_FedFundsRate", "DXY", "SP500_Index", 
+                        "Nikkei_Index", "CPI_US", "CPI_JP", "TradeDeficit_JP_US", "usdjpy")
+  
+  # Define groups and datasets (before standardization)
+  groups <- c("P1", "N1", "P2", "N2", "P3", "N3")
+  datasets <- list(P1, N1, P2, N2, P3, N3)
+  
+  # Function to calculate summary stats for one group
+  calc_group_stats <- function(data, group_name) {
+    available_vars <- vars_to_summarize[vars_to_summarize %in% names(data)]
+    
+    # Remove missing values
+    clean_data <- data[available_vars] %>% na.omit()
+    
+    if(nrow(clean_data) == 0) return(NULL)
+    
+    # Calculate stats
+    stats_list <- list()
+    for(var in available_vars) {
+      stats_list[[var]] <- data.frame(
+        Group = group_name,
+        Variable = var,
+        N = nrow(clean_data),
+        Mean = round(mean(clean_data[[var]], na.rm = TRUE), 4),
+        SD = round(sd(clean_data[[var]], na.rm = TRUE), 4),
+        Min = round(min(clean_data[[var]], na.rm = TRUE), 4),
+        Max = round(max(clean_data[[var]], na.rm = TRUE), 4),
+        stringsAsFactors = FALSE
+      )
+    }
+    
+    return(do.call(rbind, stats_list))
+  }
+  
+  # Calculate stats for all groups
+  all_stats <- list()
+  for(i in 1:length(groups)) {
+    if(!is.null(datasets[[i]]) && nrow(datasets[[i]]) > 0) {
+      all_stats[[groups[i]]] <- calc_group_stats(datasets[[i]], groups[i])
+    }
+  }
+  
+  # Combine all stats
+  combined_stats <- do.call(rbind, all_stats)
+  
+  if(is.null(combined_stats)) {
+    cat("No data available for summary statistics\n")
+    return(NULL)
+  }
+  
+  # Print summary table
+  cat("\n=== DESCRIPTIVE STATISTICS FOR ALL GROUPS ===\n")
+  print(combined_stats)
+  
+  # Calculate date ranges for each group
+  date_ranges <- list()
+  for(i in 1:length(groups)) {
+    if(!is.null(datasets[[i]]) && nrow(datasets[[i]]) > 0 && "ISSUE_DT" %in% names(datasets[[i]])) {
+      clean_dates <- datasets[[i]]$ISSUE_DT[!is.na(datasets[[i]]$ISSUE_DT)]
+      if(length(clean_dates) > 0) {
+        start_date <- format(min(clean_dates), "%Y-%m-%d")
+        end_date <- format(max(clean_dates), "%Y-%m-%d")
+        date_ranges[[groups[i]]] <- paste(start_date, "to", end_date)
+      } else {
+        date_ranges[[groups[i]]] <- "No valid dates"
+      }
+    } else {
+      date_ranges[[groups[i]]] <- "No data"
+    }
+  }
+  
+  # Create LaTeX table
+  cat("\n\nLATEX TABLE CODE:\n")
+  cat("================\n")
+  
+  cat("\\begin{table}[htbp]\n")
+  cat("\\centering\n")
+  cat("\\caption{Descriptive Statistics by Group}\n")
+  cat("\\label{tab:descriptive_stats}\n")
+  cat("\\adjustbox{width=\\textwidth,center}{\n")
+  cat("\\tiny\n")
+  cat("\\begin{tabular}{llcccccc}\n")
+  cat("\\hline\n")
+  cat("Group & Variable & N & Mean & SD & Min & Max \\\\\n")
+  cat("\\hline\n")
+  
+  for(i in 1:nrow(combined_stats)) {
+    row_data <- combined_stats[i, ]
+    # Format variable names for LaTeX
+    var_display <- gsub("_", "\\_", row_data$Variable, fixed = TRUE)
+    
+    cat(sprintf("%s & %s & %d & %.4f & %.4f & %.4f & %.4f \\\\\n",
+                row_data$Group,
+                var_display,
+                row_data$N,
+                row_data$Mean,
+                row_data$SD,
+                row_data$Min,
+                row_data$Max))
+  }
+  
+  cat("\\hline\n")
+  
+  # Add date ranges as the last row
+  cat("\\multicolumn{7}{c}{\\textbf{Issue Date Ranges by Group}} \\\\\n")
+  cat("\\hline\n")
+  for(group in groups) {
+    if(group %in% names(date_ranges)) {
+      cat(sprintf("%s & \\multicolumn{6}{c}{%s} \\\\\n", group, date_ranges[[group]]))
+    }
+  }
+  
+  cat("\\hline\n")
+  cat("\\end{tabular}\n")
+  cat("}\n")
+  cat("\\begin{tablenotes}\n")
+  cat("\\scriptsize\n")
+  cat("\\item \\textbf{Notes:} Descriptive statistics for all variables across the six bond groups. ")
+  cat("P1, P2, P3 represent positive spread rules of increasing complexity. ")
+  cat("N1, N2, N3 represent negative spread rules of increasing complexity. ")
+  cat("Statistics calculated using non-standardized data.\n")
+  cat("\\end{tablenotes}\n")
+  cat("\\end{table}\n")
+  
+  return(combined_stats)
+}
+
+# Generate the summary statistics table
+summary_stats_result <- create_summary_stats_table()
+```
+
+
+```{r}
+
+# ================================
+# STANDARDIZATION FUNCTION
+# ================================
+
+standardize_data <- function(data) {
+  # Define ONLY numeric variables to standardize
+  numeric_vars <- c("YIELD_ON_ISSUE_DATE", "JPN_Treasury_BidCover", "US_Treasury_BidCover", 
+                    "US_FedFundsRate", "BOJ_FundRate", "DXY", "SP500_Index", 
+                    "Nikkei_Index", "CPI_US", "CPI_JP", "TradeDeficit_JP_US", "usdjpy")
+  
+  # Keep other variables as-is (date and count variables)
+  other_vars <- c("ISSUE_DT", "bond_count")
+  
+  # Select available columns
+  available_numeric <- numeric_vars[numeric_vars %in% names(data)]
+  available_other <- other_vars[other_vars %in% names(data)]
+  
+  # Remove rows with missing values in numeric variables only
+  clean_data <- data[c(available_numeric, available_other)] %>%
+    filter(complete.cases(.[available_numeric]))
+  
+  if(nrow(clean_data) == 0) {
+    return(data.frame())
+  }
+  
+  # Initialize standardized data with all variables (numeric + others)
+  std_data <- clean_data
+  
+  # Standardize only numeric variables
+  for(var in available_numeric) {
+    var_sd <- sd(clean_data[[var]], na.rm = TRUE)
+    
+    if(var_sd == 0 || is.na(var_sd)) {
+      cat(sprintf("Warning: Variable '%s' has zero or NA standard deviation. Keeping original values.\n", var))
+      std_data[[var]] <- clean_data[[var]]
+    } else {
+      var_mean <- mean(clean_data[[var]], na.rm = TRUE)
+      std_data[[var]] <- (clean_data[[var]] - var_mean) / var_sd
+    }
+  }
+  
+  # Ensure ISSUE_DT is included and properly formatted
+  if("ISSUE_DT" %in% names(clean_data)) {
+    std_data$ISSUE_DT <- as.Date(clean_data$ISSUE_DT)
+  }
+  
+  # Arrange by date and reorder columns to put ISSUE_DT first
+  std_data <- std_data %>% 
+    arrange(ISSUE_DT) %>%
+    dplyr::select(ISSUE_DT, everything())
+  
+  return(std_data)
+}
+
+# Standardize all datasets (now includes ISSUE_DT and bond_count)
+P1_std <- standardize_data(P1)
+N1_std <- standardize_data(N1)
+P2_std <- standardize_data(P2)
+N2_std <- standardize_data(N2)
+P3_std <- standardize_data(P3)
+N3_std <- standardize_data(N3)
+
+
+```
+
+
+
+```{r}
+# ================================
+# CORRELATION HEATMAPS 
+# ================================
+
+# Define the regression variables )
+regression_vars <- c("YIELD_ON_ISSUE_DATE", "JPN_Treasury_BidCover", "US_Treasury_BidCover", 
+                    "US_FedFundsRate", "DXY", "SP500_Index", 
+                    "Nikkei_Index", "CPI_US", "CPI_JP", "TradeDeficit_JP_US", "usdjpy")
+
+# Create correlation matrices for all groups
+group_correlations <- list()
+group_names <- c("P1", "N1", "P2", "N2", "P3", "N3")
+group_datasets <- list(P1_std, N1_std, P2_std, N2_std, P3_std, N3_std)
+
+# Calculate correlations for each group
+for(i in 1:length(group_names)) {
+  if(nrow(group_datasets[[i]]) > 0) {
+    # Select only the regression variables that exist in the dataset
+    available_vars <- regression_vars[regression_vars %in% names(group_datasets[[i]])]
+    
+    if(length(available_vars) > 1) {
+      group_data <- group_datasets[[i]][available_vars] %>% na.omit()
+      
+      if(nrow(group_data) > 1) {
+        group_correlations[[group_names[i]]] <- cor(group_data, use = "complete.obs")
+      }
+    }
+  }
+}
+
+# Reorder groups: P1, P2, P3 in first row; N1, N2, N3 in second row
+plot_order <- c("P1", "P2", "P3", "N1", "N2", "N3")
+
+# Display the correlation plots
+par(mfrow = c(2, 3))
+par(mar = c(5, 5, 3, 2))
+
+for(group in plot_order) {
+  if(group %in% names(group_correlations)) {
+    corrplot(group_correlations[[group]], 
+             method = "color", 
+             type = "upper", 
+             tl.cex = 0.7,
+             tl.col = "black",
+             title = group,
+             mar = c(0, 0, 2, 0))
+  }
+}
+
+# Reset plotting parameters
+par(mfrow = c(1, 1))
+par(mar = c(5, 4, 4, 2) + 0.1)
+```
+
+
+
+
+Fig K.1
+```{r}
+
+# ================================
+# CATEGORIZED ISSUE DATE INTERVALS ANALYSIS (STANDALONE)
+# ================================
+
+# Define datasets
+datasets <- list(P1 = P1, N1 = N1, P2 = P2, N2 = N2, P3 = P3, N3 = N3)
+
+categorize_issue_intervals <- function(datasets) {
+  cat("CATEGORIZING ISSUE DATE INTERVALS\n")
+  cat("=================================\n")
+  
+  # Define categories
+  categories <- c("<1 month", "1-3 months", ">3 months")
+  
+  # Define group order: positives first, then negatives
+  group_order <- c("P1", "P2", "P3", "N1", "N2", "N3")
+  
+  categorized_results <- list()
+  plot_data_all <- data.frame()
+  
+  for(group_name in group_order) {
+    if(!group_name %in% names(datasets)) next
+    
+    data <- datasets[[group_name]]
+    
+    # Sort by issue date
+    data_sorted <- data %>% 
+      arrange(ISSUE_DT) %>%
+      filter(!is.na(ISSUE_DT))
+    
+    if(nrow(data_sorted) < 2) {
+      cat(sprintf("Warning: %s has insufficient data for categorization\n", group_name))
+      next
+    }
+    
+    # Calculate intervals between adjacent issue dates
+    issue_dates <- data_sorted$ISSUE_DT
+    intervals_days <- as.numeric(diff(issue_dates))
+    
+    # Categorize intervals
+    interval_categories <- ifelse(intervals_days <= 30, "<1 month",
+                                 ifelse(intervals_days <= 90, "1-3 months", ">3 months"))
+    
+    # Count frequencies
+    category_counts <- table(factor(interval_categories, levels = categories))
+    category_props <- prop.table(category_counts) * 100
+    
+    # Create data frame for this group
+    group_data <- data.frame(
+      Group = group_name,
+      Category = names(category_counts),
+      Count = as.numeric(category_counts),
+      Percentage = as.numeric(category_props),
+      stringsAsFactors = FALSE
+    )
+    
+    # Ensure all categories are present
+    group_data$Category <- factor(group_data$Category, levels = categories)
+    
+    categorized_results[[group_name]] <- list(
+      intervals = intervals_days,
+      categories = interval_categories,
+      summary = group_data
+    )
+    
+    plot_data_all <- rbind(plot_data_all, group_data)
+    
+    cat(sprintf("%s: <1 month: %d (%.1f%%), 1-3 months: %d (%.1f%%), >3 months: %d (%.1f%%)\n",
+                group_name, 
+                category_counts["<1 month"], category_props["<1 month"],
+                category_counts["1-3 months"], category_props["1-3 months"],
+                category_counts[">3 months"], category_props[">3 months"]))
+  }
+  
+  # Create summary table
+  if(nrow(plot_data_all) > 0) {
+    summary_table <- plot_data_all %>%
+      dplyr::select(Group, Category, Count, Percentage) %>%
+      tidyr::pivot_wider(names_from = Category, values_from = c(Count, Percentage), names_sep = "_")
+    
+    cat("\n=== CATEGORIZED INTERVAL SUMMARY ===\n")
+    print(summary_table)
+    
+    # Create the 2x3 subplot layout
+    plot_data_all$Group <- factor(plot_data_all$Group, levels = group_order)
+    plot_data_all$Category <- factor(plot_data_all$Category, levels = categories)
+    
+    # Create individual plots for each group
+    plot_list <- list()
+    
+    for(group in group_order) {
+      if(!group %in% plot_data_all$Group) next
+      
+      group_data <- plot_data_all[plot_data_all$Group == group, ]
+      
+      p <- ggplot(group_data, aes(x = Category, y = Count)) +
+        geom_bar(stat = "identity", fill = "steelblue", color = "black", alpha = 0.8) +
+        geom_text(aes(label = paste0(Count, "\n(", round(Percentage, 1), "%)")), 
+                  vjust = -0.1, size = 3) +
+        labs(title = group,
+             x = "",
+             y = "Count") +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+          axis.text.x = element_text(angle = 0, hjust = 0.5),
+          axis.title.y = element_text(size = 10),
+          panel.grid.minor = element_blank()
+        ) +
+        scale_y_continuous(expand = expansion(mult = c(0, 0.15)))
+      
+      plot_list[[group]] <- p
+    }
+    
+    # Create the 2x3 grid plot
+    cat("\n=== CATEGORIZED INTERVAL DISTRIBUTION PLOTS ===\n")
+    
+    # Arrange plots: P1, P2, P3 in first row; N1, N2, N3 in second row
+    if(length(plot_list) >= 6) {
+      grid.arrange(
+        plot_list[["P1"]], plot_list[["P2"]], plot_list[["P3"]],
+        plot_list[["N1"]], plot_list[["N2"]], plot_list[["N3"]],
+        nrow = 2, ncol = 3,
+        top = "Issue Date Interval Categories by Group"
+      )
+    } else {
+      # Handle case where some groups might be missing
+      available_plots <- plot_list[names(plot_list) %in% group_order]
+      n_plots <- length(available_plots)
+      if(n_plots > 0) {
+        if(n_plots <= 3) {
+          grid.arrange(grobs = available_plots, nrow = 1, ncol = n_plots)
+        } else {
+          grid.arrange(grobs = available_plots, nrow = 2, ncol = 3)
+        }
+      }
+    }
+    
+    # Create overall summary statistics
+    cat("\n=== OVERALL CATEGORIZATION STATISTICS ===\n")
+    overall_summary <- plot_data_all %>%
+      group_by(Category) %>%
+      summarise(
+        Total_Count = sum(Count),
+        Mean_Percentage = round(mean(Percentage), 2),
+        SD_Percentage = round(sd(Percentage), 2),
+        .groups = 'drop'
+      )
+    print(overall_summary)
+  }
+  
+  return(categorized_results)
+}
+
+# Apply categorized interval analysis
+categorized_intervals <- categorize_issue_intervals(datasets)
+```
+
+
+
+```{r}
+
+
+# ================================
+#  DATA PREPARATION FUNCTION WITH STANDARDIZATION
+# ================================
+
+prepare_time_series_data <- function(data) {
+  # Sort by date and convert to time series
+  data <- data %>% arrange(ISSUE_DT)
+  
+  # Define variables for transformation
+  transform_vars <- c("YIELD_ON_ISSUE_DATE", "US_FedFundsRate", "DXY", "SP500_Index", 
+                     "Nikkei_Index", "usdjpy")
+  
+  # Define other numeric variables
+  other_numeric_vars <- c("JPN_Treasury_BidCover", "US_Treasury_BidCover", 
+                         "CPI_US", "CPI_JP", "TradeDeficit_JP_US")
+  
+  # Select available variables
+  available_transform <- transform_vars[transform_vars %in% names(data)]
+  available_other <- other_numeric_vars[other_numeric_vars %in% names(data)]
+  all_numeric_vars <- c(available_transform, available_other)
+  
+  # Create clean dataset with complete cases
+  clean_data <- data %>%
+    dplyr::select(ISSUE_DT, all_of(all_numeric_vars)) %>%
+    filter(complete.cases(.))
+  
+  if(nrow(clean_data) < 10) {
+    cat(sprintf("Warning: Insufficient data after cleaning (only %d rows)\n", nrow(clean_data)))
+    return(NULL)
+  }
+  
+  # ================================
+  # STANDARDIZATION OF ALL NUMERIC VARIABLES
+  # ================================
+  
+  cat(sprintf("Standardizing variables...\n"))
+  
+  # Standardize all numeric variables: (x - mean) / sd
+  for(var in all_numeric_vars) {
+    mean_val <- mean(clean_data[[var]], na.rm = TRUE)
+    sd_val <- sd(clean_data[[var]], na.rm = TRUE)
+    
+    # Check for zero standard deviation
+    if(sd_val == 0 || is.na(sd_val)) {
+      cat(sprintf("Warning: Variable %s has zero or NA standard deviation - not standardized\n", var))
+      next
+    }
+    
+    # Standardize: (x - mean) / sd
+    clean_data[[var]] <- (clean_data[[var]] - mean_val) / sd_val
+    
+    cat(sprintf("Standardized %s: Mean %.4f -> 0, SD %.4f -> 1\n", 
+                var, mean_val, sd_val))
+  }
+  
+  # Verify standardization
+  cat("Post-standardization check:\n")
+  for(var in all_numeric_vars) {
+    new_mean <- mean(clean_data[[var]], na.rm = TRUE)
+    new_sd <- sd(clean_data[[var]], na.rm = TRUE)
+    if(abs(new_mean) > 1e-10 || abs(new_sd - 1) > 1e-10) {
+      cat(sprintf("  %s: Mean=%.6f, SD=%.6f\n", var, new_mean, new_sd))
+    }
+  }
+  
+  # Convert to time series object using standardized data
+  ts_data <- ts(clean_data[, -1], frequency = 1)  # Exclude date column
+  colnames(ts_data) <- all_numeric_vars
+  
+  # Store the date information
+  attr(ts_data, "dates") <- clean_data$ISSUE_DT
+  
+  return(list(
+    ts_data = ts_data,
+    clean_data = clean_data,  
+    transform_vars = available_transform,
+    other_vars = available_other
+  ))
+}
+
+# ================================
+# APPLY DATA PREPARATION WITH STANDARDIZATION TO ALL DATASETS
+# ================================
+
+
+# Create the datasets list that the code expects
+datasets <- list(
+  "P1" = P1,
+  "N1" = N1,
+  "P2" = P2,
+  "N2" = N2,
+  "P3" = P3,
+  "N3" = N3
+)
+
+cat("Created datasets list with groups:", names(datasets), "\n")
+
+cat("\n\nPREPARING TIME SERIES DATA WITH STANDARDIZATION (NO BOJ_FUNDRATE)\n")
+cat("==================================================================\n")
+
+# Apply to all datasets
+prepared_data <- list()
+
+for(group_name in names(datasets)) {
+  cat(sprintf("\nProcessing %s dataset:\n", group_name))
+  
+  prepared_data[[group_name]] <- prepare_time_series_data(datasets[[group_name]])
+  
+  if(!is.null(prepared_data[[group_name]])) {
+    cat(sprintf("  - %d observations prepared with standardized variables\n", 
+                nrow(prepared_data[[group_name]]$ts_data)))
+  } else {
+    cat("  - Failed to prepare data\n")
+  }
+}
+
+# Remove failed preparations
+successful_data <- prepared_data[!sapply(prepared_data, is.null)]
+
+#cat(sprintf("\nSuccessfully prepared %d datasets with standardized variables\n", length(successful_data)))
+cat("All regression models will use standardized data (mean=0, sd=1)\n")
+
+```
+
+```{r}
+
+# ================================
+# OUTLIER REMOVAL USING Z-SCORE (THRESHOLD = 2) ON STANDARDIZED DATA
+# ================================
+
+cat("\nREMOVING OUTLIERS USING Z-SCORE (|Z| > 2) ON STANDARDIZED DATA\n")
+cat("===============================================================\n")
+
+# Function to remove outliers using Z-score on standardized data
+remove_outliers_zscore_standardized <- function(data_obj, group_name, variable_name = "YIELD_ON_ISSUE_DATE", threshold = 2) {
+  if(is.null(data_obj) || is.null(data_obj$clean_data) || nrow(data_obj$clean_data) == 0) {
+    cat(sprintf("%s: No data available\n", group_name))
+    return(data_obj)
+  }
+  
+  clean_data <- data_obj$clean_data
+  
+  # Since data is already standardized, we can directly use the threshold
+  variable_values <- clean_data[[variable_name]]
+  
+  # Identify outliers (|standardized value| > threshold)
+  outliers <- abs(variable_values) > threshold
+  n_outliers <- sum(outliers, na.rm = TRUE)
+  original_n <- nrow(clean_data)
+  
+  if(n_outliers == 0) {
+    cat(sprintf("%s: No outliers found (threshold = %d)\n", group_name, threshold))
+    return(data_obj)
+  }
+  
+  # Remove outliers
+  clean_data_filtered <- clean_data[!outliers & !is.na(outliers), ]
+  
+  # Update time series data
+  ts_data_filtered <- ts(clean_data_filtered[, -1], frequency = 1)  # Exclude date column
+  colnames(ts_data_filtered) <- colnames(data_obj$ts_data)
+  attr(ts_data_filtered, "dates") <- clean_data_filtered$ISSUE_DT
+  
+  # Create updated data object
+  updated_data_obj <- list(
+    ts_data = ts_data_filtered,
+    clean_data = clean_data_filtered,
+    transform_vars = data_obj$transform_vars,
+    other_vars = data_obj$other_vars
+  )
+  
+  cat(sprintf("%s: Removed %d outliers (%.1f%%) - %d -> %d observations\n", 
+              group_name, n_outliers, (n_outliers/original_n)*100, 
+              original_n, nrow(clean_data_filtered)))
+  
+  return(updated_data_obj)
+}
+
+# ================================
+# APPLY OUTLIER REMOVAL TO INDIVIDUAL GROUPS
+# ================================
+
+# P1 group
+if("P1" %in% names(successful_data)) {
+  successful_data[["P1"]] <- remove_outliers_zscore_standardized(
+    successful_data[["P1"]], "P1", "YIELD_ON_ISSUE_DATE", threshold = 2)
+}
+
+
+
+# N1 group
+if("N1" %in% names(successful_data)) {
+  successful_data[["N1"]] <- remove_outliers_zscore_standardized(
+    successful_data[["N1"]], "N1", "YIELD_ON_ISSUE_DATE", threshold = 2)
+}
+
+
+
+cat("\nOutlier removal completed for selected groups.\n")
+cat("Note: Outliers defined as |Z-score| > 2 on standardized YIELD_ON_ISSUE_DATE\n")
+
+# Display final sample sizes
+cat("\n=== FINAL SAMPLE SIZES AFTER OUTLIER REMOVAL ===\n")
+for(group_name in names(successful_data)) {
+  if(!is.null(successful_data[[group_name]]) && 
+     !is.null(successful_data[[group_name]]$clean_data)) {
+    n_obs <- nrow(successful_data[[group_name]]$clean_data)
+    cat(sprintf("%s: %d observations\n", group_name, n_obs))
+  } else {
+    cat(sprintf("%s: No data available\n", group_name))
+  }
+}
+
+
+```
+
+
+
+```{r}
+# ================================
+# LAGGED DYNAMIC LINEAR MODEL 
+# ================================
+
+run_lagged_model <- function(ts_data, group_name) {
+  tryCatch({
+    # Variables that will have BOTH current and lagged versions 
+    lag_financial_vars <- c("US_FedFundsRate", "DXY", "SP500_Index", 
+                           "Nikkei_Index", "usdjpy")
+    
+    # ALL variables (will appear in current form, EXCLUDING BOJ_FundRate)
+    all_vars <- c("US_FedFundsRate", "DXY", "SP500_Index", "Nikkei_Index", "usdjpy",
+                  "JPN_Treasury_BidCover", "US_Treasury_BidCover", 
+                  "CPI_US", "CPI_JP", "TradeDeficit_JP_US")
+    
+    # Get available variables
+    available_lag_financial <- lag_financial_vars[lag_financial_vars %in% colnames(ts_data)]
+    available_all <- all_vars[all_vars %in% colnames(ts_data)]
+    
+    # Check if we have enough observations (need at least 2 lags for dependent variable)
+    n_total <- nrow(ts_data)
+    effective_n <- n_total - 2  # 2 lags maximum
+    
+    cat(sprintf("Sample size check: %d total obs, %d effective after 2 lags\n", 
+                n_total, effective_n))
+    
+    if(effective_n < 10) {
+      cat(sprintf("ERROR: Insufficient observations for %s after applying 2 lags\n", 
+                  group_name))
+      return(NULL)
+    }
+    
+    # Create formula for lagged model
+    lag_regressors <- c()
+    
+    # Add 2 lags of dependent variable (not current)
+    if("YIELD_ON_ISSUE_DATE" %in% colnames(ts_data)) {
+      lag_dep_1 <- "L(YIELD_ON_ISSUE_DATE, 1)"
+      lag_dep_2 <- "L(YIELD_ON_ISSUE_DATE, 2)"
+      lag_regressors <- c(lag_regressors, lag_dep_1, lag_dep_2)
+      cat(sprintf("Added lagged dependent variables: %s, %s\n", lag_dep_1, lag_dep_2))
+    }
+    
+    # Add ALL variables in current form
+    for(var in available_all) {
+      lag_regressors <- c(lag_regressors, var)
+      cat(sprintf("Added current version: %s\n", var))
+    }
+    
+    # Add 1 lag of ONLY selected financial variables
+    for(var in available_lag_financial) {
+      lag_var <- paste0("L(", var, ", 1)")
+      lag_regressors <- c(lag_regressors, lag_var)
+      cat(sprintf("Added 1 lagged version: %s\n", lag_var))
+    }
+    
+    if(length(lag_regressors) == 0) {
+      cat("Warning: No regressors available for", group_name, "\n")
+      return(NULL)
+    }
+    
+    # Create formula
+    formula_str <- paste("YIELD_ON_ISSUE_DATE ~", paste(lag_regressors, collapse = " + "))
+    cat(sprintf("Lagged model formula for %s: %s\n", group_name, substr(formula_str, 1, 150)))
+    if(nchar(formula_str) > 150) cat("...\n")
+    cat(sprintf("Total number of regressors: %d\n", length(lag_regressors)))
+    
+    # Fit model
+    model <- dynlm(as.formula(formula_str), data = ts_data)
+    
+    # Print coefficient names to verify lag structure
+    cat(sprintf("Model coefficients for %s (%d total):\n", group_name, length(coef(model))))
+    
+    return(model)
+    
+  }, error = function(e) {
+    cat("Lagged model failed for", group_name, ":", e$message, "\n")
+    return(NULL)
+  })
+}
+
+# ================================
+#  MODEL DIAGNOSTICS WITH KURTOSIS CALCULATION
+# ================================
+
+perform_model_diagnostics <- function(model, group_name) {
+  if(is.null(model)) return(NULL)
+  
+  # Extract residuals and fitted values
+  residuals_model <- residuals(model)
+  fitted_vals <- fitted(model)
+  n_obs <- length(residuals_model)
+  
+  # Test for kurtosis
+  kurtosis_test <- test_kurtosis(residuals_model, group_name)
+  
+  # Assumption tests
+  # 1. Normality Test (Shapiro-Wilk)
+  normality_pvalue <- if(n_obs <= 5000 && n_obs >= 3) {
+    tryCatch({
+      if(var(residuals_model, na.rm = TRUE) > 1e-10) {
+        shapiro.test(residuals_model)$p.value
+      } else {
+        cat(sprintf("Warning: %s has identical residuals - perfect fit or model issue\n", group_name))
+        NA
+      }
+    }, error = function(e) {
+      cat(sprintf("Shapiro test failed for %s: %s\n", group_name, e$message))
+      NA
+    })
+  } else { NA }
+  
+  # 2. Homoscedasticity Test (Breusch-Pagan)
+  bp_pvalue <- tryCatch({
+    bptest(model)$p.value
+  }, error = function(e) NA)
+  
+  # 3. No Autocorrelation Test (Ljung-Box)
+  ljung_pvalue <- tryCatch({
+    Box.test(residuals_model, lag = min(10, floor(n_obs/5)), type = "Ljung-Box")$p.value
+  }, error = function(e) NA)
+  
+  # Create assumption results
+  assumption_results <- data.frame(
+    Group = group_name,
+    Model_Type = "Normal",
+    Normality_OK = ifelse(is.na(normality_pvalue), "Unknown",
+                          ifelse(normality_pvalue > 0.05, "✓", "✗")),
+    Homoscedasticity_OK = ifelse(is.na(bp_pvalue), "Unknown",
+                                ifelse(bp_pvalue > 0.05, "✓", "✗")),
+    No_Autocorrelation = ifelse(is.na(ljung_pvalue), "Unknown",
+                               ifelse(ljung_pvalue > 0.05, "✓", "✗")),
+    Excess_Kurtosis = round(kurtosis_test$excess_kurtosis, 3),
+    Heavy_Tails = kurtosis_test$needs_t_dist,
+    N_Obs = n_obs,
+    Normality_pvalue = round(normality_pvalue, 4),
+    BP_pvalue = round(bp_pvalue, 4),
+    Ljung_Box_pvalue = round(ljung_pvalue, 4),
+    stringsAsFactors = FALSE
+  )
+  
+  # Model statistics
+  model_stats <- data.frame(
+    Group = group_name,
+    Model_Type = "Normal",
+    N_Obs = n_obs,
+    R_squared = round(summary(model)$r.squared, 4),
+    Adj_R_squared = round(summary(model)$adj.r.squared, 4),
+    F_statistic = round(summary(model)$fstatistic[1], 4),
+    F_pvalue = round(pf(summary(model)$fstatistic[1], 
+                       summary(model)$fstatistic[2], 
+                       summary(model)$fstatistic[3], 
+                       lower.tail = FALSE), 4),
+    AIC = round(AIC(model), 2),
+    BIC = round(BIC(model), 2),
+    stringsAsFactors = FALSE
+  )
+  
+  # Extract coefficients
+  coef_summary <- summary(model)$coefficients
+  if(nrow(coef_summary) > 1) {  # Exclude intercept
+    coef_results <- data.frame(
+      Group = group_name,
+      Model_Type = "Normal",
+      Variable = rownames(coef_summary)[-1],  # Exclude intercept
+      Coefficient = round(coef_summary[-1, "Estimate"], 4),
+      Std_Error = round(coef_summary[-1, "Std. Error"], 4),
+      t_value = round(coef_summary[-1, "t value"], 3),
+      p_value = round(coef_summary[-1, "Pr(>|t|)"], 4),
+      Significance = ifelse(coef_summary[-1, "Pr(>|t|)"] < 0.001, "***",
+                           ifelse(coef_summary[-1, "Pr(>|t|)"] < 0.01, "**",
+                                 ifelse(coef_summary[-1, "Pr(>|t|)"] < 0.05, "*",
+                                       ifelse(coef_summary[-1, "Pr(>|t|)"] < 0.10, ".", "")))),
+      stringsAsFactors = FALSE
+    )
+  } else {
+    coef_results <- data.frame()
+  }
+  
+  return(list(
+    model = model,
+    assumptions = assumption_results,
+    stats = model_stats,
+    coefficients = coef_results,
+    kurtosis_test = kurtosis_test
+  ))
+}
+
+# ================================
+# KURTOSIS TEST FUNCTION (SIMPLIFIED)
+# ================================
+
+test_kurtosis <- function(residuals_model, group_name) {
+  # Calculate excess kurtosis (kurtosis - 3)
+  library(moments)
+  kurt_val <- kurtosis(residuals_model) - 3  # Excess kurtosis
+  
+  # Jarque-Bera test for normality (tests both skewness and kurtosis)
+  jb_test <- tryCatch({
+    jarque.test(residuals_model)
+  }, error = function(e) {
+    list(statistic = NA, p.value = NA)
+  })
+  
+  # Simple rule: excess kurtosis > 1 suggests heavy tails
+  needs_t_dist <- abs(kurt_val) > 1
+  
+  # Fix the sprintf formatting issue with NA p-values
+  pvalue_str <- if(is.na(jb_test$p.value)) {
+    "NA"
+  } else {
+    sprintf("%.4f", jb_test$p.value)
+  }
+  
+  cat(sprintf("Group %s: Excess Kurtosis = %.3f, JB p-value = %s, Heavy Tails = %s\n", 
+              group_name, kurt_val, pvalue_str, needs_t_dist))
+  
+  return(list(
+    excess_kurtosis = kurt_val,
+    jb_pvalue = jb_test$p.value,
+    needs_t_dist = needs_t_dist
+  ))
+}
+
+# ================================
+# DIAGNOSTIC PLOTS FUNCTION
+# ================================
+
+create_diagnostic_plots <- function(model, group_name) {
+  if(is.null(model)) return(NULL)
+  
+  # Extract residuals and fitted values
+  residuals_model <- residuals(model)
+  fitted_vals <- fitted(model)
+  
+  # Set up plot layout - 2x3 for 6 plots
+  par(mfrow = c(2, 3))
+  par(mar = c(4, 4, 3, 2))
+  
+  # Plot 1: Residuals vs Fitted
+  graphics::plot.default(fitted_vals, residuals_model, 
+       main = paste(group_name, "- Residuals vs Fitted"),
+       xlab = "Fitted Values", ylab = "Residuals",
+       pch = 16, col = "blue", type = "p")
+  abline(h = 0, col = "red", lty = 2)
+  
+  # Plot 2: Q-Q plot
+  qqnorm(residuals_model, main = paste(group_name, "- Q-Q Plot"))
+  qqline(residuals_model, col = "red")
+  
+  # Plot 3: Scale-Location plot
+  sqrt_abs_resid <- sqrt(abs(residuals_model))
+  graphics::plot.default(fitted_vals, sqrt_abs_resid,
+       main = paste(group_name, "- Scale-Location"),
+       xlab = "Fitted Values", ylab = "√|Residuals|",
+       pch = 16, col = "blue", type = "p")
+  
+  # Plot 4: ACF of residuals
+  acf(residuals_model, main = paste(group_name, "- ACF"))
+  
+  # Plot 5: PACF of residuals
+  pacf(residuals_model, main = paste(group_name, "- PACF"))
+  
+  # Plot 6: Residuals Distribution
+  hist(residuals_model, main = paste(group_name, "- Distribution"),
+       xlab = "Residuals", freq = FALSE, col = "lightblue", border = "black")
+  lines(density(residuals_model), col = "red", lwd = 2)
+  
+  # Reset plotting parameters
+  par(mfrow = c(1, 1))
+  par(mar = c(5, 4, 4, 2) + 0.1)
+}
+
+```
+
+
+
+
+
+Fig K.4
+```{r}
+
+# ================================
+# RUN NORMAL MODELS WITH KURTOSIS ANALYSIS
+# ================================
+
+cat("\n\nRUNNING NORMAL MODELS WITH KURTOSIS ANALYSIS (NO BOJ_FUNDRATE)\n")
+cat("=============================================================\n")
+
+lagged_results <- list()
+for(group_name in names(successful_data)) {
+  cat("\nFitting normal lagged model for:", group_name, "\n")
+  model <- run_lagged_model(successful_data[[group_name]]$ts_data, group_name)
+  lagged_results[[group_name]] <- perform_model_diagnostics(model, group_name)
+}
+
+# Remove failed models
+successful_results <- lagged_results[!sapply(lagged_results, is.null)]
+
+# ================================
+# WHITE NOISE TESTS
+# ================================
+
+run_white_noise_tests <- function(model, group_name) {
+  if(is.null(model)) return(NULL)
+  
+  residuals_model <- residuals(model)
+  n_obs <- length(residuals_model)
+  
+  # Test 1: Ljung-Box Test for Autocorrelation
+  ljung_result <- tryCatch({
+    Box.test(residuals_model, lag = min(10, floor(n_obs/5)), type = "Ljung-Box")
+  }, error = function(e) list(statistic = NA, p.value = NA))
+  
+  # Test 2: Breusch-Pagan Test for Homoscedasticity
+  bp_result <- tryCatch({
+    bptest(model)
+  }, error = function(e) list(statistic = NA, p.value = NA))
+  
+  # Test 3: Jarque-Bera Test for Normality
+  jb_result <- tryCatch({
+    jarque.test(residuals_model)
+  }, error = function(e) list(statistic = NA, p.value = NA))
+  
+  # Return results
+  data.frame(
+    Group = group_name,
+    N_Obs = n_obs,
+    Ljung_Box_Stat = round(ljung_result$statistic, 4),
+    Ljung_Box_pvalue = round(ljung_result$p.value, 4),
+    BP_Stat = round(bp_result$statistic, 4),
+    BP_pvalue = round(bp_result$p.value, 4),
+    JB_Stat = round(jb_result$statistic, 4),
+    JB_pvalue = round(jb_result$p.value, 4),
+    White_Noise_OK = ifelse(ljung_result$p.value > 0.05, "✓", "✗"),
+    Homoscedastic_OK = ifelse(bp_result$p.value > 0.05, "✓", "✗"),
+    Normal_OK = ifelse(jb_result$p.value > 0.05, "✓", "✗"),
+    stringsAsFactors = FALSE
+  )
+}
+
+cat("\n\nWHITE NOISE TESTS FOR NORMAL MODELS\n")
+cat("===================================\n")
+
+# Run tests on results
+test_results_list <- list()
+for(group_name in names(successful_results)) {
+  test_results_list[[group_name]] <- run_white_noise_tests(
+    successful_results[[group_name]]$model, 
+    group_name
+  )
+}
+
+# Combine all results into one table
+white_noise_test_table <- do.call(rbind, test_results_list)
+
+# Display the results
+cat("WHITE NOISE TESTS COMPARISON TABLE\n")
+cat("==================================\n")
+print(white_noise_test_table)
+
+# ================================
+# DISPLAY RESULTS
+# ================================
+
+if(length(successful_results) > 0) {
+  
+  cat("\n=== SIMPLIFIED LAGGED MODELS RESULTS (NORMAL DISTRIBUTION ONLY) ===\n")
+  
+  # Combine assumption results
+  all_assumptions <- do.call(rbind, lapply(successful_results, function(x) x$assumptions))
+  assumption_table <- all_assumptions %>%
+    dplyr::select(Group, Model_Type, Normality_OK, Homoscedasticity_OK, No_Autocorrelation, 
+                  Excess_Kurtosis, Heavy_Tails)
+  
+  cat("\n=== ASSUMPTION CHECKS WITH KURTOSIS ANALYSIS ===\n")
+  print(assumption_table)
+  
+  # Model statistics
+  all_stats <- do.call(rbind, lapply(successful_results, function(x) x$stats))
+  cat("\n=== MODEL STATISTICS ===\n")
+  print(all_stats)
+  
+  # Coefficient results
+  all_coef <- do.call(rbind, lapply(successful_results, function(x) x$coefficients))
+  
+  if(nrow(all_coef) > 0) {
+    cat("\n=== JAPANESE TREASURY BID-COVER EFFECTS ===\n")
+    jpn_effects <- all_coef %>%
+      filter(grepl("JPN_Treasury_BidCover", Variable)) %>%
+      dplyr::select(Group, Variable, Coefficient, Std_Error, t_value, p_value, Significance)
+    print(jpn_effects)
+    
+    cat("\n=== LAGGED DEPENDENT VARIABLE EFFECTS (2 LAGS) ===\n")
+    lag_dep_effects <- all_coef %>%
+      filter(grepl("YIELD_ON_ISSUE_DATE.*lag", Variable) | grepl("L\\(YIELD_ON_ISSUE_DATE", Variable)) %>%
+      dplyr::select(Group, Variable, Coefficient, Std_Error, t_value, p_value, Significance) %>%
+      arrange(Group, Variable)
+    print(lag_dep_effects)
+    
+    cat("\n=== ALL COEFFICIENTS ===\n")
+    print(all_coef)
+  }
+  
+  # Create diagnostic plots
+  cat("\n=== DIAGNOSTIC PLOTS ===\n")
+  for(group in names(successful_results)) {
+    create_diagnostic_plots(successful_results[[group]]$model, group)
+  }
+}
+
+cat("\n\nSIMPLIFIED ANALYSIS COMPLETE\n")
+cat("===========================\n")
+cat("Simplified Lagged Dynamic Linear Model (Normal Distribution Only):\n")
+cat("Model: Y ~ L(Y,1) + L(Y,2) + X1 + L(X1,1) + X2 + L(X2,1) + ... + Z\n")
+cat("Where:\n")
+cat("  Y = YIELD_ON_ISSUE_DATE (dependent variable)\n")
+cat("  L(Y,k) = k-th lag of dependent variable (k = 1, 2)\n")
+cat("  X = Financial variables (current + 1 lag): US_FedFundsRate, DXY, SP500_Index, Nikkei_Index, usdjpy\n")
+cat("  L(X,1) = 1st lag of financial variables\n")
+cat("  Z = Control variables (current only): JPN_Treasury_BidCover, US_Treasury_BidCover, CPI_US, CPI_JP, TradeDeficit_JP_US\n")
+cat("  Error Distribution: Normal (with excess kurtosis reported for diagnostic purposes)\n")
+cat("  Note: BOJ_FundRate has been removed from all analyses\n")
+
+
+
+```
+
+
+
+
+
+Table K.1
+```{r}
+# ================================
+# COMPREHENSIVE RESIDUAL DIAGNOSTIC TESTS FOR ALL GROUPS
+# ================================
+
+comprehensive_residual_tests <- function(successful_results) {
+  
+  # Initialize results list
+  test_results <- list()
+  
+  # Run tests for each group
+  for(group_name in names(successful_results)) {
+    model <- successful_results[[group_name]]$model
+    
+    if(!is.null(model)) {
+      # Extract residuals
+      residuals_model <- residuals(model)
+      n_obs <- length(residuals_model)
+      
+      # 1. Ljung-Box Test for Serial Correlation (White Noise)
+      test_lag <- min(10, floor(n_obs/5))
+      ljung_test <- tryCatch({
+        Box.test(residuals_model, lag = test_lag, type = "Ljung-Box")
+      }, error = function(e) list(statistic = NA, p.value = NA))
+      
+      # 2. Shapiro-Wilk Test for Normality
+      normality_test <- if(n_obs <= 5000 && n_obs >= 3) {
+        tryCatch({
+          if(var(residuals_model, na.rm = TRUE) > 1e-10) {
+            shapiro.test(residuals_model)
+          } else {
+            list(statistic = NA, p.value = NA)
+          }
+        }, error = function(e) list(statistic = NA, p.value = NA))
+      } else {
+        list(statistic = NA, p.value = NA)
+      }
+      
+      # 3. Breusch-Pagan Test for Homoscedasticity
+      bp_test <- tryCatch({
+        library(lmtest)
+        bptest(model)
+      }, error = function(e) list(statistic = NA, p.value = NA))
+      
+      # Store results
+      test_results[[group_name]] <- data.frame(
+        Group = group_name,
+        N_Obs = n_obs,
+        Test_Lag = test_lag,
+        
+        # Ljung-Box Test
+        LB_Statistic = round(ljung_test$statistic, 4),
+        LB_P_Value = round(ljung_test$p.value, 4),
+        White_Noise = ifelse(is.na(ljung_test$p.value), "Unknown", 
+                            ifelse(ljung_test$p.value > 0.05, "Yes", "No")),
+        
+        # Normality Test
+        SW_Statistic = round(normality_test$statistic, 4),
+        SW_P_Value = round(normality_test$p.value, 4),
+        Normal = ifelse(is.na(normality_test$p.value), "Unknown", 
+                       ifelse(normality_test$p.value > 0.05, "Yes", "No")),
+        
+        # Homoscedasticity Test
+        BP_Statistic = round(bp_test$statistic, 4),
+        BP_P_Value = round(bp_test$p.value, 4),
+        Homoscedastic = ifelse(is.na(bp_test$p.value), "Unknown", 
+                              ifelse(bp_test$p.value > 0.05, "Yes", "No")),
+        
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  
+  # Combine results
+  comprehensive_table <- do.call(rbind, test_results)
+  rownames(comprehensive_table) <- NULL
+  
+  return(comprehensive_table)
+}
+
+# ================================
+# CREATE COMPREHENSIVE OVERLEAF TABLE
+# ================================
+
+create_comprehensive_diagnostics_overleaf_table <- function(comprehensive_table) {
+  
+  cat("\\begin{table}[htbp]\n")
+  cat("\\centering\n")
+  cat("\\caption{Comprehensive Residual Diagnostic Tests}\n")
+  cat("\\label{tab:comprehensive_diagnostics}\n")
+  cat("\\adjustbox{width=\\textwidth,center}{\n")
+  cat("\\scriptsize\n")
+  cat("\\begin{tabular}{lcccccccccccc}\n")
+  cat("\\toprule\n")
+  cat("& & \\multicolumn{3}{c}{Serial Correlation} & \\multicolumn{3}{c}{Normality} & \\multicolumn{3}{c}{Homoscedasticity} \\\\\n")
+  cat("\\cmidrule(lr){3-5} \\cmidrule(lr){6-8} \\cmidrule(lr){9-11}\n")
+  cat("Group & N & LB Stat & p-value & White Noise & SW Stat & p-value & Normal & BP Stat & p-value & Homosced. \\\\\n")
+  cat("\\midrule\n")
+  
+  for(i in 1:nrow(comprehensive_table)) {
+    row_data <- comprehensive_table[i, ]
+    
+    # Format p-values and statistics
+    lb_stat <- ifelse(is.na(row_data$LB_Statistic), "--", sprintf("%.3f", row_data$LB_Statistic))
+    lb_pval <- ifelse(is.na(row_data$LB_P_Value), "--", sprintf("%.3f", row_data$LB_P_Value))
+    sw_stat <- ifelse(is.na(row_data$SW_Statistic), "--", sprintf("%.3f", row_data$SW_Statistic))
+    sw_pval <- ifelse(is.na(row_data$SW_P_Value), "--", sprintf("%.3f", row_data$SW_P_Value))
+    bp_stat <- ifelse(is.na(row_data$BP_Statistic), "--", sprintf("%.3f", row_data$BP_Statistic))
+    bp_pval <- ifelse(is.na(row_data$BP_P_Value), "--", sprintf("%.3f", row_data$BP_P_Value))
+    
+    cat(sprintf("%s & %d & %s & %s & %s & %s & %s & %s & %s & %s & %s \\\\\n",
+                row_data$Group,
+                row_data$N_Obs,
+                lb_stat, lb_pval, row_data$White_Noise,
+                sw_stat, sw_pval, row_data$Normal,
+                bp_stat, bp_pval, row_data$Homoscedastic))
+  }
+  
+  cat("\\bottomrule\n")
+  cat("\\end{tabular}\n")
+  cat("}\n")
+  cat("\\begin{tablenotes}\n")
+  cat("\\scriptsize\n")
+  cat("\\item \\textbf{Notes:} ")
+  cat("LB = Ljung-Box test for serial correlation (H$_0$: no serial correlation). ")
+  cat("SW = Shapiro-Wilk test for normality (H$_0$: residuals are normal). ")
+  cat("BP = Breusch-Pagan test for homoscedasticity (H$_0$: constant variance). ")
+  cat("p-value $>$ 0.05 indicates acceptance of null hypothesis. ")
+  cat("Test lag for LB chosen as min(10, n/5) where n is sample size. ")
+  cat("SW test not performed for n $>$ 5000.\n")
+  cat("\\end{tablenotes}\n")
+  cat("\\end{table}\n")
+}
+
+# ================================
+# RUN COMPREHENSIVE TESTS
+# ================================
+
+# Run the comprehensive tests
+comprehensive_results <- comprehensive_residual_tests(successful_results)
+
+# Display results
+cat("COMPREHENSIVE RESIDUAL DIAGNOSTIC TESTS\n")
+cat("=======================================\n")
+print(comprehensive_results)
+
+# Summary statistics
+cat("\n=== SUMMARY OF TEST RESULTS ===\n")
+total_groups <- nrow(comprehensive_results)
+white_noise_pass <- sum(comprehensive_results$White_Noise == "Yes", na.rm = TRUE)
+normal_pass <- sum(comprehensive_results$Normal == "Yes", na.rm = TRUE)
+homosced_pass <- sum(comprehensive_results$Homoscedastic == "Yes", na.rm = TRUE)
+
+cat(sprintf("Groups passing Ljung-Box test (White Noise): %d/%d (%.1f%%)\n", 
+            white_noise_pass, total_groups, (white_noise_pass/total_groups)*100))
+cat(sprintf("Groups passing Shapiro-Wilk test (Normality): %d/%d (%.1f%%)\n", 
+            normal_pass, total_groups, (normal_pass/total_groups)*100))
+cat(sprintf("Groups passing Breusch-Pagan test (Homoscedasticity): %d/%d (%.1f%%)\n", 
+            homosced_pass, total_groups, (homosced_pass/total_groups)*100))
+
+# Generate Overleaf table
+cat("\n\nCOMPREHENSIVE OVERLEAF TABLE CODE:\n")
+cat("==================================\n")
+create_comprehensive_diagnostics_overleaf_table(comprehensive_results)
+
+```
+
+
+Table 5
+```{r}
+
+# ================================
+# CREATE COMPREHENSIVE OVERLEAF TABLE FOR LAGGED REGRESSION RESULTS 
+# ================================
+
+create_comprehensive_overleaf_table <- function(successful_results) {
+  
+  # Extract coefficients from all results
+  all_coef <- do.call(rbind, lapply(successful_results, function(x) x$coefficients))
+  
+  # Extract model statistics
+  all_stats <- do.call(rbind, lapply(successful_results, function(x) x$stats))
+  
+  # Standardize variable names for consistency
+  all_coef <- all_coef %>%
+    mutate(Variable = case_when(
+      Variable == "L(YIELD_ON_ISSUE_DATE, 1)" ~ "YIELD_ON_ISSUE_DATE_lag1",
+      Variable == "L(YIELD_ON_ISSUE_DATE, 2)" ~ "YIELD_ON_ISSUE_DATE_lag2",
+      Variable == "L(US_FedFundsRate, 1)" ~ "US_FedFundsRate_lag1",
+      Variable == "L(DXY, 1)" ~ "DXY_lag1",
+      Variable == "L(SP500_Index, 1)" ~ "SP500_Index_lag1",
+      Variable == "L(Nikkei_Index, 1)" ~ "Nikkei_Index_lag1",
+      Variable == "L(usdjpy, 1)" ~ "usdjpy_lag1",
+      TRUE ~ Variable
+    ))
+  
+  # Define variable order for the table
+  variable_order <- c(
+    "YIELD_ON_ISSUE_DATE_lag1",
+    "YIELD_ON_ISSUE_DATE_lag2",
+    "US_FedFundsRate",
+    "US_FedFundsRate_lag1",
+    "DXY",
+    "DXY_lag1",
+    "SP500_Index",
+    "SP500_Index_lag1",
+    "Nikkei_Index",
+    "Nikkei_Index_lag1",
+    "usdjpy",
+    "usdjpy_lag1",
+    "JPN_Treasury_BidCover",
+    "US_Treasury_BidCover",
+    "CPI_US",
+    "CPI_JP",
+    "TradeDeficit_JP_US"
+  )
+  
+  # Filter to only include variables that exist in the data
+  existing_variables <- unique(all_coef$Variable)
+  variable_order <- variable_order[variable_order %in% existing_variables]
+  
+  all_groups <- names(successful_results)
+  
+  # Create results table with significance stars
+  results_table <- all_coef %>%
+    dplyr::select(Group, Variable, Coefficient, Std_Error, p_value) %>%
+    mutate(
+      Coef_with_Stars = paste0(
+        sprintf("%.4f", Coefficient),
+        ifelse(p_value < 0.001, "***",
+               ifelse(p_value < 0.01, "**",
+                     ifelse(p_value < 0.05, "*",
+                           ifelse(p_value < 0.10, ".", ""))))
+      ),
+      SE_formatted = paste0("(", sprintf("%.4f", Std_Error), ")")
+    )
+  
+  # Reshape to wide format
+  coef_wide <- results_table %>%
+    dplyr::select(Group, Variable, Coef_with_Stars) %>%
+    pivot_wider(names_from = Group, values_from = Coef_with_Stars)
+  
+  se_wide <- results_table %>%
+    dplyr::select(Group, Variable, SE_formatted) %>%
+    pivot_wider(names_from = Group, values_from = SE_formatted)
+  
+  # Model statistics rows -  Adjusted R-squared and Observations
+  adj_r2_row <- all_stats %>%
+    dplyr::select(Group, Adj_R_squared) %>%
+    mutate(R2_formatted = sprintf("%.4f", Adj_R_squared)) %>%
+    dplyr::select(Group, R2_formatted) %>%
+    pivot_wider(names_from = Group, values_from = R2_formatted)
+  
+  n_obs_row <- all_stats %>%
+    dplyr::select(Group, N_Obs) %>%
+    mutate(N_formatted = as.character(N_Obs)) %>%
+    pivot_wider(names_from = Group, values_from = N_formatted)
+  
+  # Create LaTeX table
+  cat("\\begin{table}[htbp]\n")
+  cat("\\centering\n")
+  cat("\\caption{Lagged Dynamic Linear Model Results for Japanese Municipal Bond Yields (Normal Distribution)}\n")
+  cat("\\label{tab:lagged_regression_normal}\n")
+  cat("\\adjustbox{width=\\textwidth,center}{\n")
+  cat("\\scriptsize\n")
+  
+  # Column specification
+  col_spec <- paste0("l", paste(rep("c", length(all_groups)), collapse = ""))
+  cat(paste0("\\begin{tabular}{", col_spec, "}\n"))
+  cat("\\toprule\n")
+  
+  # Header
+  header <- paste("Variable", paste(all_groups, collapse = " & "), "\\\\")
+  cat(header, "\n")
+  cat("\\midrule\n")
+  
+  # Variable rows (coefficient and standard error pairs)
+  for(var in variable_order) {
+    # Coefficient row
+    coef_row <- c(var)
+    for(group in all_groups) {
+      if(var %in% coef_wide$Variable) {
+        coef_val <- coef_wide[coef_wide$Variable == var, group, drop = TRUE]
+        coef_row <- c(coef_row, ifelse(length(coef_val) > 0 && !is.na(coef_val), 
+                                      as.character(coef_val), ""))
+      } else {
+        coef_row <- c(coef_row, "")
+      }
+    }
+    cat(paste(coef_row, collapse = " & "), " \\\\\n")
+    
+    # Standard error row
+    se_row <- c("")
+    for(group in all_groups) {
+      if(var %in% se_wide$Variable) {
+        se_val <- se_wide[se_wide$Variable == var, group, drop = TRUE]
+        se_row <- c(se_row, ifelse(length(se_val) > 0 && !is.na(se_val), 
+                                  as.character(se_val), ""))
+      } else {
+        se_row <- c(se_row, "")
+      }
+    }
+    cat(paste(se_row, collapse = " & "), " \\\\\n")
+  }
+  
+  cat("\\midrule\n")
+  
+  # Model statistics -  Adjusted R-squared and Observations
+  # Adjusted R-squared
+  adj_r2_row_data <- c("Adj. R²")
+  for(group in all_groups) {
+    adj_r2_val <- adj_r2_row[[group]][1]
+    adj_r2_row_data <- c(adj_r2_row_data, ifelse(!is.na(adj_r2_val), as.character(adj_r2_val), ""))
+  }
+  cat(paste(adj_r2_row_data, collapse = " & "), " \\\\\n")
+  
+  # Number of observations
+  n_obs_row_data <- c("Observations")
+  for(group in all_groups) {
+    n_val <- n_obs_row[[group]][1]
+    n_obs_row_data <- c(n_obs_row_data, ifelse(!is.na(n_val), as.character(n_val), ""))
+  }
+  cat(paste(n_obs_row_data, collapse = " & "), " \\\\\n")
+  
+  # Error distribution
+  dist_row_data <- c("Error Distribution", rep("Normal", length(all_groups)))
+  cat(paste(dist_row_data, collapse = " & "), " \\\\\n")
+  
+  cat("\\bottomrule\n")
+  cat("\\end{tabular}\n")
+  cat("}\n")
+  
+  # Table notes
+  cat("\\begin{tablenotes}\n")
+  cat("\\scriptsize\n")
+  cat("\\item \\textbf{Notes:} Standard errors in parentheses. ")
+  cat("Significance levels: *** p$<$0.001, ** p$<$0.01, * p$<$0.05, . p$<$0.10. ")
+  cat("Model: $Y_t = \\alpha + \\beta_1 Y_{t-1} + \\beta_2 Y_{t-2} + \\gamma_0 X_t + \\gamma_1 X_{t-1} + \\delta Z_t + \\varepsilon_t$, ")
+  cat("where $Y_t$ is the yield on issue date, $X_t$ includes financial variables (US Fed Funds Rate, DXY, S\\&P 500, Nikkei, USD/JPY), ")
+  cat("and $Z_t$ includes control variables. All models assume Normal error distribution. ")
+  cat("All variables are standardized (mean=0, sd=1). ")
+  cat("Groups: P1/P2/P3 = prefectures, N1/N2/N3 = nationwide bonds.\n")
+  cat("\\end{tablenotes}\n")
+  cat("\\end{table}\n")
+  
+  return(invisible(NULL))
+}
+
+# ================================
+# GENERATE THE COMPREHENSIVE OVERLEAF TABLE
+# ================================
+
+cat("\n\nCOMPREHENSIVE OVERLEAF TABLE FOR LAGGED REGRESSION RESULTS\n")
+cat("==========================================================\n")
+create_comprehensive_overleaf_table(successful_results)
+
+```
+
+
+
+
+
+Table K.4 and Fig K.5
+```{r}
+
+
+# ================================
+# ADDITIONAL FOURTH-ORDER RULES - NEGATIVE (N3_2 and N3_3)
+# ================================
+
+# ■ Negative Fourth-Order Rule 3 (N3_2)
+# Rule: {Call : Non-callable, CPN : 5_8.5(%), S OID : Less than 17} => {S-}
+n_fourth_rule3 <- active_months %>%
+  left_join(
+    ARL %>%
+      filter(year >= 2016,
+             CALLABLE == "Call : Non-callable",
+             CPN_Group == "CPN : 5_8.5(%)",
+             S_AT_Iss == "S OID : Less than 17",
+             Med_m_SL == "S-") %>%
+      group_by(ID_CUSIP) %>%
+      summarise(months_negative = n(), .groups = "drop"),
+    by = "ID_CUSIP"
+  ) %>%
+  replace_na(list(months_negative = 0)) %>%
+  mutate(
+    ratio_negative = months_negative / total_months_active,
+    rule_id = "n_fourth_rule3"
+  ) %>%
+  filter(ratio_negative >= negative_threshold) %>%
+  left_join(
+    ARL %>%
+      filter(CALLABLE == "Call : Non-callable",
+             CPN_Group == "CPN : 5_8.5(%)",
+             S_AT_Iss == "S OID : Less than 17") %>%
+      dplyr::select(ID_CUSIP, ISSUE_DT, YIELD_ON_ISSUE_DATE) %>%
+      distinct(ID_CUSIP, .keep_all = TRUE),
+    by = "ID_CUSIP"
+  )
+
+# ■ Negative Fourth-Order Rule 4 (N3_3)
+# Rule: {Call : Non-callable, Tax : FED & ST TAX-EXEMPT, S OID : Less than 17} => {S-}
+n_fourth_rule4 <- active_months %>%
+  left_join(
+    ARL %>%
+      filter(year >= 2016,
+             CALLABLE == "Call : Non-callable",
+             MUNI_TAX_PROV == "Tax : FED & ST TAX-EXEMPT",
+             S_AT_Iss == "S OID : Less than 17",
+             Med_m_SL == "S-") %>%
+      group_by(ID_CUSIP) %>%
+      summarise(months_negative = n(), .groups = "drop"),
+    by = "ID_CUSIP"
+  ) %>%
+  replace_na(list(months_negative = 0)) %>%
+  mutate(
+    ratio_negative = months_negative / total_months_active,
+    rule_id = "n_fourth_rule4"
+  ) %>%
+  filter(ratio_negative >= negative_threshold) %>%
+  left_join(
+    ARL %>%
+      filter(CALLABLE == "Call : Non-callable",
+             MUNI_TAX_PROV == "Tax : FED & ST TAX-EXEMPT",
+             S_AT_Iss == "S OID : Less than 17") %>%
+      dplyr::select(ID_CUSIP, ISSUE_DT, YIELD_ON_ISSUE_DATE) %>%
+      distinct(ID_CUSIP, .keep_all = TRUE),
+    by = "ID_CUSIP"
+  )
+
+# ================================
+# ADD BOND ATTRIBUTES TO NEW RULE DATASETS
+# ================================
+
+n_fourth_rule3 <- n_fourth_rule3 %>%
+  left_join(features_to_merge, by = "ID_CUSIP")
+
+n_fourth_rule4 <- n_fourth_rule4 %>%
+  left_join(features_to_merge, by = "ID_CUSIP")
+
+# ================================
+# CREATE REGRESSION DATASETS FOR NEW GROUPS
+# ================================
+
+N3_2 <- create_regression_data(n_fourth_rule3, "N3_2")
+N3_3 <- create_regression_data(n_fourth_rule4, "N3_3")
+
+# ================================
+# STANDARDIZE NEW DATASETS
+# ================================
+
+N3_2_std <- standardize_data(N3_2)
+N3_3_std <- standardize_data(N3_3)
+
+# ================================
+# PREPARE TIME SERIES DATA FOR NEW GROUPS
+# ================================
+
+# Add new datasets to the datasets list
+datasets_extended <- list(
+  "P1" = P1,
+  "N1" = N1,
+  "P2" = P2,
+  "N2" = N2,
+  "P3" = P3,
+  "N3" = N3,
+  "N3_2" = N3_2,
+  "N3_3" = N3_3
+)
+
+cat("\n\nPREPARING TIME SERIES DATA FOR NEW GROUPS (N3_2 and N3_3)\n")
+cat("==========================================================\n")
+
+# Prepare data for new groups only
+new_prepared_data <- list()
+
+for(group_name in c("N3_2", "N3_3")) {
+  cat(sprintf("\nProcessing %s dataset:\n", group_name))
+  
+  new_prepared_data[[group_name]] <- prepare_time_series_data(datasets_extended[[group_name]])
+  
+  if(!is.null(new_prepared_data[[group_name]])) {
+    cat(sprintf("  - %d observations prepared with standardized variables\n", 
+                nrow(new_prepared_data[[group_name]]$ts_data)))
+  } else {
+    cat("  - Failed to prepare data\n")
+  }
+}
+
+# Remove failed preparations
+new_successful_data <- new_prepared_data[!sapply(new_prepared_data, is.null)]
+
+# ================================
+# OUTLIER REMOVAL FOR NEW GROUPS
+# ================================
+
+cat("\nREMOVING OUTLIERS FOR NEW GROUPS (|Z| > 2)\n")
+cat("==========================================\n")
+
+# N3_2 group
+if("N3_2" %in% names(new_successful_data)) {
+  new_successful_data[["N3_2"]] <- remove_outliers_zscore_standardized(
+    new_successful_data[["N3_2"]], "N3_2", "YIELD_ON_ISSUE_DATE", threshold = 2)
+}
+
+# N3_3 group
+if("N3_3" %in% names(new_successful_data)) {
+  new_successful_data[["N3_3"]] <- remove_outliers_zscore_standardized(
+    new_successful_data[["N3_3"]], "N3_3", "YIELD_ON_ISSUE_DATE", threshold = 2)
+}
+
+# Display final sample sizes for new groups
+cat("\n=== FINAL SAMPLE SIZES FOR NEW GROUPS AFTER OUTLIER REMOVAL ===\n")
+for(group_name in names(new_successful_data)) {
+  if(!is.null(new_successful_data[[group_name]]) && 
+     !is.null(new_successful_data[[group_name]]$clean_data)) {
+    n_obs <- nrow(new_successful_data[[group_name]]$clean_data)
+    cat(sprintf("%s: %d observations\n", group_name, n_obs))
+  } else {
+    cat(sprintf("%s: No data available\n", group_name))
+  }
+}
+
+# ================================
+# RUN NORMAL MODELS FOR NEW GROUPS
+# ================================
+
+cat("\n\nRUNNING NORMAL MODELS FOR NEW GROUPS (N3_2 and N3_3)\n")
+cat("====================================================\n")
+
+new_lagged_results <- list()
+for(group_name in names(new_successful_data)) {
+  cat("\nFitting normal lagged model for:", group_name, "\n")
+  model <- run_lagged_model(new_successful_data[[group_name]]$ts_data, group_name)
+  new_lagged_results[[group_name]] <- perform_model_diagnostics(model, group_name)
+}
+
+# Remove failed models
+new_successful_results <- new_lagged_results[!sapply(new_lagged_results, is.null)]
+
+# ================================
+# WHITE NOISE TESTS FOR NEW GROUPS
+# ================================
+
+cat("\n\nWHITE NOISE TESTS FOR NEW GROUPS\n")
+cat("=================================\n")
+
+# Run tests on new results
+new_test_results_list <- list()
+for(group_name in names(new_successful_results)) {
+  new_test_results_list[[group_name]] <- run_white_noise_tests(
+    new_successful_results[[group_name]]$model, 
+    group_name
+  )
+}
+
+# Combine new results into one table
+new_white_noise_test_table <- do.call(rbind, new_test_results_list)
+
+# Display the results
+cat("WHITE NOISE TESTS FOR NEW GROUPS\n")
+cat("=================================\n")
+print(new_white_noise_test_table)
+
+# ================================
+# DISPLAY RESULTS FOR NEW GROUPS
+# ================================
+
+if(length(new_successful_results) > 0) {
+  
+  cat("\n=== NEW GROUPS LAGGED MODELS RESULTS (NORMAL DISTRIBUTION) ===\n")
+  
+  # Combine assumption results
+  new_all_assumptions <- do.call(rbind, lapply(new_successful_results, function(x) x$assumptions))
+  new_assumption_table <- new_all_assumptions %>%
+    dplyr::select(Group, Model_Type, Normality_OK, Homoscedasticity_OK, No_Autocorrelation, 
+                  Excess_Kurtosis, Heavy_Tails)
+  
+  cat("\n=== ASSUMPTION CHECKS WITH KURTOSIS ANALYSIS ===\n")
+  print(new_assumption_table)
+  
+  # Model statistics
+  new_all_stats <- do.call(rbind, lapply(new_successful_results, function(x) x$stats))
+  cat("\n=== MODEL STATISTICS ===\n")
+  print(new_all_stats)
+  
+  # Coefficient results
+  new_all_coef <- do.call(rbind, lapply(new_successful_results, function(x) x$coefficients))
+  
+  if(nrow(new_all_coef) > 0) {
+    cat("\n=== JAPANESE TREASURY BID-COVER EFFECTS ===\n")
+    new_jpn_effects <- new_all_coef %>%
+      filter(grepl("JPN_Treasury_BidCover", Variable)) %>%
+      dplyr::select(Group, Variable, Coefficient, Std_Error, t_value, p_value, Significance)
+    print(new_jpn_effects)
+    
+    cat("\n=== LAGGED DEPENDENT VARIABLE EFFECTS (2 LAGS) ===\n")
+    new_lag_dep_effects <- new_all_coef %>%
+      filter(grepl("YIELD_ON_ISSUE_DATE.*lag", Variable) | grepl("L\\(YIELD_ON_ISSUE_DATE", Variable)) %>%
+      dplyr::select(Group, Variable, Coefficient, Std_Error, t_value, p_value, Significance) %>%
+      arrange(Group, Variable)
+    print(new_lag_dep_effects)
+    
+    cat("\n=== ALL COEFFICIENTS FOR NEW GROUPS ===\n")
+    print(new_all_coef)
+  }
+}
+
+# ================================
+#  RESIDUAL TESTS FOR NEW GROUPS
+# ================================
+
+# Run comprehensive tests for new groups
+new_comprehensive_results <- comprehensive_residual_tests(new_successful_results)
+
+# Display results
+cat("\n\nCOMPREHENSIVE RESIDUAL DIAGNOSTIC TESTS FOR NEW GROUPS\n")
+cat("======================================================\n")
+print(new_comprehensive_results)
+
+# Summary statistics for new groups
+cat("\n=== SUMMARY OF TEST RESULTS FOR NEW GROUPS ===\n")
+new_total_groups <- nrow(new_comprehensive_results)
+new_white_noise_pass <- sum(new_comprehensive_results$White_Noise == "Yes", na.rm = TRUE)
+new_normal_pass <- sum(new_comprehensive_results$Normal == "Yes", na.rm = TRUE)
+new_homosced_pass <- sum(new_comprehensive_results$Homoscedastic == "Yes", na.rm = TRUE)
+
+cat(sprintf("Groups passing Ljung-Box test (White Noise): %d/%d (%.1f%%)\n", 
+            new_white_noise_pass, new_total_groups, (new_white_noise_pass/new_total_groups)*100))
+cat(sprintf("Groups passing Shapiro-Wilk test (Normality): %d/%d (%.1f%%)\n", 
+            new_normal_pass, new_total_groups, (new_normal_pass/new_total_groups)*100))
+cat(sprintf("Groups passing Breusch-Pagan test (Homoscedasticity): %d/%d (%.1f%%)\n", 
+            new_homosced_pass, new_total_groups, (new_homosced_pass/new_total_groups)*100))
+
+# ================================
+# CREATE DIAGNOSTIC PLOTS FOR NEW GROUPS
+# ================================
+
+cat("\n=== DIAGNOSTIC PLOTS FOR NEW GROUPS ===\n")
+for(group in names(new_successful_results)) {
+  create_diagnostic_plots(new_successful_results[[group]]$model, group)
+}
+
+# ================================
+# SAVE DIAGNOSTIC PLOTS FOR NEW GROUPS
+# ================================
+
+# # Dynamic path detection 
+# candidates <- path.expand("path")
+# 
+# existing <- Filter(dir.exists, candidates)
+# if (length(existing) == 0) {
+#   stop("Couldn't find your path on this machine.")
+# }
+# save_dir <- normalizePath(existing[[1]], winslash = "/", mustWork = TRUE)
+# 
+# cat("Using plots save path:", save_dir, "\n")
+# 
+# for(group in names(new_successful_results)) {
+#   # Define filename
+#   filename <- file.path(save_dir, paste0("diagnostic_plots_", group, "_Normal.png"))
+#   
+#   # Open PNG device
+#   png(filename, width = 1200, height = 800, res = 120)
+#   
+#   # Create the diagnostic plots
+#   create_diagnostic_plots(new_successful_results[[group]]$model, group)
+#   
+#   # Close the device
+#   dev.off()
+#   
+#   cat(sprintf("Saved diagnostic plots for %s (Normal) to: %s\n", group, filename))
+# }
+
+# ================================
+# CORRELATION ANALYSIS FOR NEW GROUPS
+# ================================
+
+cat("\n\nCORRELATION ANALYSIS FOR NEW GROUPS\n")
+cat("===================================\n")
+
+# Define the regression variables (EXCLUDING BOJ_FundRate)
+regression_vars <- c("YIELD_ON_ISSUE_DATE", "JPN_Treasury_BidCover", "US_Treasury_BidCover", 
+                    "US_FedFundsRate", "DXY", "SP500_Index", 
+                    "Nikkei_Index", "CPI_US", "CPI_JP", "TradeDeficit_JP_US", "usdjpy")
+
+# Create correlation matrices for new groups
+new_group_correlations <- list()
+new_group_names <- c("N3_2", "N3_3")
+new_group_datasets <- list(N3_2_std, N3_3_std)
+
+# Calculate correlations for each new group
+for(i in 1:length(new_group_names)) {
+  if(nrow(new_group_datasets[[i]]) > 0) {
+    # Select only the regression variables that exist in the dataset (no BOJ_FundRate)
+    available_vars <- regression_vars[regression_vars %in% names(new_group_datasets[[i]])]
+    
+    if(length(available_vars) > 1) {
+      group_data <- new_group_datasets[[i]][available_vars] %>% na.omit()
+      
+      if(nrow(group_data) > 1) {
+        new_group_correlations[[new_group_names[i]]] <- cor(group_data, use = "complete.obs")
+        cat(sprintf("Correlation matrix calculated for %s\n", new_group_names[i]))
+      }
+    }
+  }
+}
+
+# Create correlation plots for new groups
+if(length(new_group_correlations) > 0) {
+  # Set up plot for new groups
+  par(mfrow = c(1, length(new_group_correlations)))
+  par(mar = c(5, 5, 3, 2))
+  
+  for(group in names(new_group_correlations)) {
+    corrplot(new_group_correlations[[group]], 
+             method = "color", 
+             type = "upper", 
+             tl.cex = 0.7,
+             tl.col = "black",
+             title = group,
+             mar = c(0, 0, 2, 0))
+  }
+  
+  # Reset plotting parameters
+  par(mfrow = c(1, 1))
+  par(mar = c(5, 4, 4, 2) + 0.1)
+  
+  # Save correlation plots for new groups
+  # filename <- file.path(save_dir, "correlation_heatmaps_new_groups.png")
+  # png(filename, width = 800, height = 400, res = 150)
+  # 
+  # par(mfrow = c(1, length(new_group_correlations)))
+  # par(mar = c(5, 5, 3, 2))
+  # 
+  # for(group in names(new_group_correlations)) {
+  #   corrplot(new_group_correlations[[group]], 
+  #            method = "color", 
+  #            type = "upper", 
+  #            tl.cex = 0.7,
+  #            tl.col = "black",
+  #            title = group,
+  #            mar = c(0, 0, 2, 0))
+  # }
+  # 
+  # dev.off()
+  # cat("Correlation plots for new groups saved to:", filename, "\n")
+  # 
+  # par(mfrow = c(1, 1))
+  # par(mar = c(5, 4, 4, 2) + 0.1)
+}
+
+# ================================
+# COMBINED OVERLEAF TABLE FOR ALL GROUPS INCLUDING NEW ONES
+# ================================
+
+# Combine all successful results (original + new)
+all_combined_results <- c(successful_results, new_successful_results)
+
+cat("\n\nCOMBINED COMPREHENSIVE OVERLEAF TABLE (INCLUDING NEW GROUPS)\n")
+cat("===========================================================\n")
+
+# Create comprehensive table including new groups
+create_comprehensive_overleaf_table_extended <- function(all_results) {
+  
+  # Extract coefficients from all results
+  all_coef <- do.call(rbind, lapply(all_results, function(x) x$coefficients))
+  
+  # Extract model statistics
+  all_stats <- do.call(rbind, lapply(all_results, function(x) x$stats))
+  
+  # Standardize variable names for consistency
+  all_coef <- all_coef %>%
+    mutate(Variable = case_when(
+      Variable == "L(YIELD_ON_ISSUE_DATE, 1)" ~ "YIELD_ON_ISSUE_DATE_lag1",
+      Variable == "L(YIELD_ON_ISSUE_DATE, 2)" ~ "YIELD_ON_ISSUE_DATE_lag2",
+      Variable == "L(US_FedFundsRate, 1)" ~ "US_FedFundsRate_lag1",
+      Variable == "L(DXY, 1)" ~ "DXY_lag1",
+      Variable == "L(SP500_Index, 1)" ~ "SP500_Index_lag1",
+      Variable == "L(Nikkei_Index, 1)" ~ "Nikkei_Index_lag1",
+      Variable == "L(usdjpy, 1)" ~ "usdjpy_lag1",
+      TRUE ~ Variable
+    ))
+  
+  # Define variable order for the table
+  variable_order <- c(
+    "YIELD_ON_ISSUE_DATE_lag1",
+    "YIELD_ON_ISSUE_DATE_lag2",
+    "US_FedFundsRate",
+    "US_FedFundsRate_lag1",
+    "DXY",
+    "DXY_lag1",
+    "SP500_Index",
+    "SP500_Index_lag1",
+    "Nikkei_Index",
+    "Nikkei_Index_lag1",
+    "usdjpy",
+    "usdjpy_lag1",
+    "JPN_Treasury_BidCover",
+    "US_Treasury_BidCover",
+    "CPI_US",
+    "CPI_JP",
+    "TradeDeficit_JP_US"
+  )
+  
+  # Filter to only include variables that exist in the data
+  existing_variables <- unique(all_coef$Variable)
+  variable_order <- variable_order[variable_order %in% existing_variables]
+  
+  all_groups <- names(all_results)
+  
+  # Create results table with significance stars
+  results_table <- all_coef %>%
+    dplyr::select(Group, Variable, Coefficient, Std_Error, p_value) %>%
+    mutate(
+      Coef_with_Stars = paste0(
+        sprintf("%.4f", Coefficient),
+        ifelse(p_value < 0.001, "***",
+               ifelse(p_value < 0.01, "**",
+                     ifelse(p_value < 0.05, "*",
+                           ifelse(p_value < 0.10, ".", ""))))
+      ),
+      SE_formatted = paste0("(", sprintf("%.4f", Std_Error), ")")
+    )
+  
+  # Reshape to wide format
+  coef_wide <- results_table %>%
+    dplyr::select(Group, Variable, Coef_with_Stars) %>%
+    pivot_wider(names_from = Group, values_from = Coef_with_Stars)
+  
+  se_wide <- results_table %>%
+    dplyr::select(Group, Variable, SE_formatted) %>%
+    pivot_wider(names_from = Group, values_from = SE_formatted)
+  
+  # Model statistics rows - ONLY Adjusted R-squared and Observations
+  adj_r2_row <- all_stats %>%
+    dplyr::select(Group, Adj_R_squared) %>%
+    mutate(R2_formatted = sprintf("%.4f", Adj_R_squared)) %>%
+    dplyr::select(Group, R2_formatted) %>%
+    pivot_wider(names_from = Group, values_from = R2_formatted)
+  
+  n_obs_row <- all_stats %>%
+    dplyr::select(Group, N_Obs) %>%
+    mutate(N_formatted = as.character(N_Obs)) %>%
+    pivot_wider(names_from = Group, values_from = N_formatted)
+  
+  # Create LaTeX table
+  cat("\\begin{table}[htbp]\n")
+  cat("\\centering\n")
+  cat("\\caption{Extended Lagged Dynamic Linear Model Results Including New Groups (Normal Distribution)}\n")
+  cat("\\label{tab:lagged_regression_extended}\n")
+  cat("\\adjustbox{width=\\textwidth,center}{\n")
+  cat("\\tiny\n")
+  
+  # Column specification
+  col_spec <- paste0("l", paste(rep("c", length(all_groups)), collapse = ""))
+  cat(paste0("\\begin{tabular}{", col_spec, "}\n"))
+  cat("\\toprule\n")
+  
+  # Header
+  header <- paste("Variable", paste(all_groups, collapse = " & "), "\\\\")
+  cat(header, "\n")
+  cat("\\midrule\n")
+  
+  # Variable rows (coefficient and standard error pairs)
+  for(var in variable_order) {
+    # Coefficient row
+    coef_row <- c(var)
+    for(group in all_groups) {
+      if(var %in% coef_wide$Variable) {
+        coef_val <- coef_wide[coef_wide$Variable == var, group, drop = TRUE]
+        coef_row <- c(coef_row, ifelse(length(coef_val) > 0 && !is.na(coef_val), 
+                                      as.character(coef_val), ""))
+      } else {
+        coef_row <- c(coef_row, "")
+      }
+    }
+    cat(paste(coef_row, collapse = " & "), " \\\\\n")
+    
+    # Standard error row
+    se_row <- c("")
+    for(group in all_groups) {
+      if(var %in% se_wide$Variable) {
+        se_val <- se_wide[se_wide$Variable == var, group, drop = TRUE]
+        se_row <- c(se_row, ifelse(length(se_val) > 0 && !is.na(se_val), 
+                                  as.character(se_val), ""))
+      } else {
+        se_row <- c(se_row, "")
+      }
+    }
+    cat(paste(se_row, collapse = " & "), " \\\\\n")
+  }
+  
+  cat("\\midrule\n")
+  
+  # Model statistics - ONLY Adjusted R-squared and Observations
+  # Adjusted R-squared
+  adj_r2_row_data <- c("Adj. R²")
+  for(group in all_groups) {
+    adj_r2_val <- adj_r2_row[[group]][1]
+    adj_r2_row_data <- c(adj_r2_row_data, ifelse(!is.na(adj_r2_val), as.character(adj_r2_val), ""))
+  }
+  cat(paste(adj_r2_row_data, collapse = " & "), " \\\\\n")
+  
+  # Number of observations
+  n_obs_row_data <- c("Observations")
+  for(group in all_groups) {
+    n_val <- n_obs_row[[group]][1]
+    n_obs_row_data <- c(n_obs_row_data, ifelse(!is.na(n_val), as.character(n_val), ""))
+  }
+  cat(paste(n_obs_row_data, collapse = " & "), " \\\\\n")
+  
+  # Error distribution
+  dist_row_data <- c("Error Distribution", rep("Normal", length(all_groups)))
+  cat(paste(dist_row_data, collapse = " & "), " \\\\\n")
+  
+  cat("\\bottomrule\n")
+  cat("\\end{tabular}\n")
+  cat("}\n")
+  
+  # Table notes
+  cat("\\begin{tablenotes}\n")
+  cat("\\scriptsize\n")
+  cat("\\item \\textbf{Notes:} Standard errors in parentheses. ")
+  cat("Significance levels: *** p$<$0.001, ** p$<$0.01, * p$<$0.05, . p$<$0.10. ")
+  cat("Model: $Y_t = \\alpha + \\beta_1 Y_{t-1} + \\beta_2 Y_{t-2} + \\gamma_0 X_t + \\gamma_1 X_{t-1} + \\delta Z_t + \\varepsilon_t$. ")
+  cat("Groups: P1/P2/P3 = positive rules, N1/N2/N3/N3\\_2/N3\\_3 = negative rules. ")
+  cat("N3\\_2: Non-callable, CPN 5-8.5\\%, S OID $<$ 17. ")
+  cat("N3\\_3: Non-callable, FED \\& ST TAX-EXEMPT, S OID $<$ 17.\n")
+  cat("\\end{tablenotes}\n")
+  cat("\\end{table}\n")
+  
+  return(invisible(NULL))
+}
+
+# Generate the extended comprehensive table
+create_comprehensive_overleaf_table_extended(all_combined_results)
+
+# ================================
+# COMBINED COMPREHENSIVE DIAGNOSTIC TABLE
+# ================================
+
+# Combine diagnostic results from all groups
+all_comprehensive_results <- comprehensive_residual_tests(all_combined_results)
+
+cat("\n\nCOMBINED COMPREHENSIVE DIAGNOSTIC TABLE (INCLUDING NEW GROUPS)\n")
+cat("=============================================================\n")
+print(all_comprehensive_results)
+
+# Generate combined Overleaf diagnostic table
+create_comprehensive_diagnostics_overleaf_table(all_comprehensive_results)
+
+cat("\n\nANALYSIS COMPLETE FOR NEW GROUPS N3_2 AND N3_3\n")
+cat("===============================================\n")
+cat("New Rules Implemented:\n")
+cat("N3_2: {Call: Non-callable, CPN: 5_8.5(%), S OID: Less than 17} => {S-}\n")
+cat("N3_3: {Call: Non-callable, Tax: FED & ST TAX-EXEMPT, S OID: Less than 17} => {S-}\n")
+```
+
+
+
+
+
